@@ -2,6 +2,7 @@
 // Licensed under the BSD-Clause 2 license.
 // See license.txt file in the project root for full license information.
 
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using ByteSizeLib;
 using Microsoft.Diagnostics.Symbols;
@@ -29,11 +30,15 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
     // and the LogStepProgress call it occasionally allows are not themselves measurable overhead.
     private const int ProgressLogEventInterval = 1_000_000;
 
+    // Concurrent lookups allowed against any one remote symbol server. Local elements are not throttled.
+    private const int MaxConcurrentLookupsPerSymbolServer = 4;
+
     // Shared across all processes and never cleared (deliberately - ModuleFileIndex values are
     // unique across the whole trace, and re-adding an already-known module is a no-op guarded by
     // ContainsKey below), so it does not need to be per-process context state.
     private readonly Dictionary<ModuleFileIndex, int> _mapModuleFileIndexToFirefox;
     private readonly SymbolReader _symbolReader;
+    private readonly string _symbolPathText;
     private readonly TraceLog _traceLog;
     private readonly Dictionary<int, string> _threadNames;
     private int _profileThreadIndex;
@@ -45,11 +50,9 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         ProfilerResult = CreateProfile();
 
         var symbolPath = options.GetCachedSymbolPath();
-        var symbolPathText = symbolPath.ToString();
+        _symbolPathText = symbolPath.ToString();
 
-        _symbolReader = new SymbolReader(TextWriter.Null, symbolPathText);
-        _symbolReader.Options = SymbolReaderOptions.None;
-        _symbolReader.SecurityCheck = (pdbPath) => true;
+        _symbolReader = CreateSymbolReader();
 
         _mapModuleFileIndexToFirefox = new();
         _threadNames = new();
@@ -61,6 +64,26 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         _symbolReader.Dispose();
         _traceLog.Dispose();
     }
+
+    /// <summary>
+    /// Creates a <see cref="SymbolReader"/> over the configured symbol path.
+    /// </summary>
+    /// <remarks>
+    /// A <see cref="SymbolReader"/> keeps unsynchronized caches internally, so it cannot be shared
+    /// across threads. Readers do share the on-disk symbol cache named by the symbol path.
+    /// </remarks>
+    private SymbolReader CreateSymbolReader() => CreateSymbolReader(_symbolPathText);
+
+    /// <summary>
+    /// Creates a <see cref="SymbolReader"/> over <paramref name="symbolPathText"/>.
+    /// </summary>
+    /// <param name="symbolPathText">The symbol path the reader should search.</param>
+    private static SymbolReader CreateSymbolReader(string symbolPathText)
+        => new(TextWriter.Null, symbolPathText)
+        {
+            Options = SymbolReaderOptions.None,
+            SecurityCheck = static _ => true,
+        };
 
     private protected override void ConvertImpl(List<int> processIds)
     {
@@ -1188,6 +1211,239 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
     private readonly record struct StackEntryKey(int Frame, int? Prefix, int? Category, int? Subcategory);
 
     /// <summary>
+    /// Finds, concurrently, which of <paramref name="modules"/> have no PDB available, so that the serial
+    /// symbol pass can skip them instead of repeating their symbol-server lookups one at a time.
+    /// </summary>
+    /// <param name="modules">The loaded modules of the process about to be symbolized.</param>
+    /// <returns>The modules for which no PDB could be found.</returns>
+    /// <remarks>
+    /// A miss costs a round trip to every remote server on the symbol path, and is not cached on disk, so
+    /// these lookups dominate <see cref="LoadModules"/> on traces containing modules whose symbols are not
+    /// published. A hit leaves the PDB in the shared cache, which every server element on the path checks
+    /// before going out, so the serial pass then resolves it locally. This does I/O only and touches no
+    /// <see cref="TraceLog"/> state.
+    /// </remarks>
+    private HashSet<ModuleFileIndex> ResolveModulesWithoutSymbols(List<TraceLoadedModule> modules)
+    {
+        var withoutSymbols = new HashSet<ModuleFileIndex>();
+
+        var symbolPath = new SymbolPath(_symbolPathText);
+        var remoteElements = symbolPath.Elements.Where(element => element.IsSymServer && element.IsRemote).ToList();
+        if (remoteElements.Count == 0)
+        {
+            // Everything is local, where the lookups are cheap and need no throttling.
+            return withoutSymbols;
+        }
+
+        var pending = new List<TraceModuleFile>();
+        var seen = new HashSet<ModuleFileIndex>();
+        foreach (var module in modules)
+        {
+            var moduleFile = module.ModuleFile;
+
+            // Mirror when the pass in LoadModules actually performs a lookup, so this never issues a
+            // request that would not otherwise have been made. Without a recorded signature,
+            // OpenPdbForModuleFile takes a local-file route this cannot resolve ahead of time.
+            if (_mapModuleFileIndexToFirefox.ContainsKey(moduleFile.ModuleFileIndex)
+                || moduleFile.CodeAddressesInModule == 0
+                || moduleFile.PdbSignature == Guid.Empty
+                || !seen.Add(moduleFile.ModuleFileIndex))
+            {
+                continue;
+            }
+
+            pending.Add(moduleFile);
+        }
+
+        if (pending.Count < 2)
+        {
+            return withoutSymbols;
+        }
+
+        // LogStepProgress reaches a console writer that is not thread safe.
+        var progressLock = new object();
+        var completed = 0;
+
+        void ReportProgress(string step, TraceModuleFile moduleFile)
+        {
+            var done = Interlocked.Increment(ref completed);
+            if (Options.LogStepProgress is { } logStepProgress)
+            {
+                lock (progressLock)
+                {
+                    logStepProgress($"{step} [{done}/{pending.Count}] for Module `{moduleFile.Name}`");
+                }
+            }
+        }
+
+        static bool HasSymbols(SymbolReader reader, TraceModuleFile moduleFile)
+        {
+            try
+            {
+                return reader.FindSymbolFilePath(
+                    moduleFile.PdbName,
+                    moduleFile.PdbSignature,
+                    moduleFile.PdbAge,
+                    moduleFile.FilePath,
+                    moduleFile.ProductVersion,
+                    portablePdbMatch: true) is not null;
+            }
+            catch
+            {
+                // Leave it to the serial pass to retry and report as before.
+                return true;
+            }
+        }
+
+        // Anything already cached is settled by reading the file system, which needs no throttling.
+        var cachedPathText = symbolPath.LocalOnly().ToString();
+        var resolved = new bool[pending.Count];
+        Parallel.For(
+            0,
+            pending.Count,
+            () => CreateSymbolReader(cachedPathText),
+            (i, _, reader) =>
+            {
+                resolved[i] = HasSymbols(reader, pending[i]);
+                if (resolved[i])
+                {
+                    ReportProgress("Resolving Cached Symbols", pending[i]);
+                }
+
+                return reader;
+            },
+            reader => reader.Dispose());
+
+        var uncached = new List<int>();
+        for (var i = 0; i < pending.Count; i++)
+        {
+            if (!resolved[i])
+            {
+                uncached.Add(i);
+            }
+        }
+
+        if (uncached.Count == 0)
+        {
+            return withoutSymbols;
+        }
+
+        var localElements = symbolPath.Elements.Where(element => !(element.IsSymServer && element.IsRemote)).ToList();
+        var servers = new List<ThrottledSymbolServer>(remoteElements.Count);
+        try
+        {
+            foreach (var remoteElement in remoteElements)
+            {
+                // A reader per server, searching the local elements plus that one remote, so every lookup
+                // is attributable to a single server and can be throttled against it.
+                var perServerPath = new SymbolPath();
+                foreach (var localElement in localElements)
+                {
+                    perServerPath.Add(localElement);
+                }
+                perServerPath.Add(remoteElement);
+
+                servers.Add(new ThrottledSymbolServer(perServerPath.ToString(), CreateSymbolReader));
+            }
+
+            // Asked in turn, stopping at the first hit. Asking them all at once was measured to be no
+            // faster - the throttle, not the walk, is the limit - and it would query every server for a
+            // module the first one already answered.
+            async Task<bool> IsOnAnyServerAsync(TraceModuleFile moduleFile)
+            {
+                var found = false;
+                foreach (var server in servers)
+                {
+                    using (var lease = await server.AcquireAsync().ConfigureAwait(false))
+                    {
+                        var reader = lease.Reader;
+                        found = await Task.Run(() => HasSymbols(reader, moduleFile)).ConfigureAwait(false);
+                    }
+
+                    if (found)
+                    {
+                        break;
+                    }
+                }
+
+                ReportProgress("Querying Symbol Servers", moduleFile);
+                return found;
+            }
+
+            var lookups = new Task<bool>[uncached.Count];
+            for (var i = 0; i < uncached.Count; i++)
+            {
+                lookups[i] = IsOnAnyServerAsync(pending[uncached[i]]);
+            }
+
+            // Awaited in order, so the result is the same whatever order they complete in.
+            for (var i = 0; i < uncached.Count; i++)
+            {
+                if (!lookups[i].GetAwaiter().GetResult())
+                {
+                    withoutSymbols.Add(pending[uncached[i]].ModuleFileIndex);
+                }
+            }
+        }
+        finally
+        {
+            foreach (var server in servers)
+            {
+                server.Dispose();
+            }
+        }
+
+        return withoutSymbols;
+    }
+
+    /// <summary>
+    /// A single remote symbol server, limited to <see cref="MaxConcurrentLookupsPerSymbolServer"/>
+    /// concurrent lookups, each with a <see cref="SymbolReader"/> of its own.
+    /// </summary>
+    private sealed class ThrottledSymbolServer : IDisposable
+    {
+        private readonly SemaphoreSlim _semaphore = new(MaxConcurrentLookupsPerSymbolServer);
+        private readonly ConcurrentBag<SymbolReader> _readers = [];
+
+        public ThrottledSymbolServer(string symbolPathText, Func<string, SymbolReader> createSymbolReader)
+        {
+            for (var i = 0; i < MaxConcurrentLookupsPerSymbolServer; i++)
+            {
+                _readers.Add(createSymbolReader(symbolPathText));
+            }
+        }
+
+        public async ValueTask<Lease> AcquireAsync()
+        {
+            await _semaphore.WaitAsync().ConfigureAwait(false);
+            _readers.TryTake(out var reader);
+            return new Lease(this, reader!);
+        }
+
+        public void Dispose()
+        {
+            while (_readers.TryTake(out var reader))
+            {
+                reader.Dispose();
+            }
+
+            _semaphore.Dispose();
+        }
+
+        /// <summary>Holds one of the server's readers until disposed.</summary>
+        public readonly struct Lease(ThrottledSymbolServer server, SymbolReader reader) : IDisposable
+        {
+            public SymbolReader Reader => reader;
+
+            public void Dispose()
+            {
+                server._readers.Add(reader);
+                server._semaphore.Release();
+            }
+        }
+    }
+
+    /// <summary>
     /// Loads the modules - and symbols for a given process.
     /// </summary>
     /// <param name="process">The process to load the modules.</param>
@@ -1201,6 +1457,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         var coreClrModuleIndex = ModuleFileIndex.Invalid;
 
         var allModules = process.LoadedModules.ToList();
+        var modulesWithoutSymbols = ResolveModulesWithoutSymbols(allModules);
 
         // Precompute the non-managed modules grouped by FilePath (OrdinalIgnoreCase, matching the
         // comparison below) once per process, instead of re-scanning `allModules` with a LINQ
@@ -1245,7 +1502,8 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                 // the module has zero code addresses attributed to it at all
                 // (CodeAddressesInModule == 0), that collected list is guaranteed to be empty, so
                 // the call would do nothing but pay for the full scan. Skip it in that case.
-                if (module.ModuleFile.CodeAddressesInModule != 0)
+                if (module.ModuleFile.CodeAddressesInModule != 0
+                    && !modulesWithoutSymbols.Contains(module.ModuleFile.ModuleFileIndex))
                 {
                     _traceLog!.CodeAddresses.LookupSymbolsForModule(_symbolReader, module.ModuleFile);
                 }
