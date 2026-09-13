@@ -24,24 +24,22 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
     private const int MinCommonPrefixDepthForRepair = 4;
     private const int MinCommonPrefixDepthAdvantageForRepair = 2;
 
+    // How often (in events) phase 2 of ConvertImpl reports progress. Picked to be frequent enough that a
+    // multi-GB trace still produces visible progress output, while being rare enough that the modulo check
+    // and the LogStepProgress call it occasionally allows are not themselves measurable overhead.
+    private const int ProgressLogEventInterval = 1_000_000;
+
+    // Shared across all processes and never cleared (deliberately - ModuleFileIndex values are
+    // unique across the whole trace, and re-adding an already-known module is a no-op guarded by
+    // ContainsKey below), so it does not need to be per-process context state.
     private readonly Dictionary<ModuleFileIndex, int> _mapModuleFileIndexToFirefox;
-    private readonly HashSet<ModuleFileIndex> _setManagedModules;
-    private readonly Dictionary<CallStackIndex, int> _mapCallStackIndexToFirefox;
-    private readonly Dictionary<CodeAddressIndex, int> _mapCodeAddressIndexToFirefox;
-    private readonly Dictionary<CodeAddressIndex, int> _mapCodeAddressIndexToMethodIndexFirefox;
-    private readonly Dictionary<MethodIndex, int> _mapMethodIndexToFirefox;
-    private readonly Dictionary<string, int> _mapStringToFirefox;
     private readonly SymbolReader _symbolReader;
-    private readonly ETWTraceEventSource _etl;
     private readonly TraceLog _traceLog;
     private readonly Dictionary<int, string> _threadNames;
-    private ModuleFileIndex _clrJitModuleIndex = ModuleFileIndex.Invalid;
-    private ModuleFileIndex _coreClrModuleIndex = ModuleFileIndex.Invalid;
     private int _profileThreadIndex;
-    
+
     public UltraConverterToFirefoxEtw(List<UltraProfilerTraceFile> traceFiles, UltraProfilerOptions options) : base(traceFiles, options)
     {
-        _etl = new ETWTraceEventSource(traceFiles[0].FileName);
         _traceLog = TraceLog.OpenOrConvert(traceFiles[0].FileName);
 
         ProfilerResult = CreateProfile();
@@ -54,12 +52,6 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         _symbolReader.SecurityCheck = (pdbPath) => true;
 
         _mapModuleFileIndexToFirefox = new();
-        _mapCallStackIndexToFirefox = new();
-        _mapCodeAddressIndexToFirefox = new();
-        _mapCodeAddressIndexToMethodIndexFirefox = new ();
-        _mapMethodIndexToFirefox = new();
-        _mapStringToFirefox = new(StringComparer.Ordinal);
-        _setManagedModules = new();
         _threadNames = new();
     }
 
@@ -68,35 +60,295 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
     {
         _symbolReader.Dispose();
         _traceLog.Dispose();
-        _etl.Dispose();
     }
 
     private protected override void ConvertImpl(List<int> processIds)
     {
-        _etl.Kernel.ThreadSetName += (ThreadSetNameTraceData data) =>
+        // Deduplicate incoming process ids, preserving first-occurrence order, before the setup loop
+        // below. Callers can pass the same id more than once (e.g. repeated --pid flags collected as-is
+        // in Program.cs). TraceProcesses.LastProcessWithID(id) returns the SAME TraceProcess instance for
+        // a repeated id, and TraceThread does not override Equals/GetHashCode, so without this dedup
+        // SetupProcess would call threadContexts.Add(thread, context) a second time with an identical key
+        // and throw ArgumentException - after the entire (possibly long) profiling run has already
+        // completed.
+        if (processIds.Count > 1)
         {
-            if (!string.IsNullOrEmpty(data.ThreadName))
+            var seenProcessIds = new HashSet<int>();
+            var dedupedProcessIds = new List<int>(processIds.Count);
+            foreach (var processId in processIds)
             {
-                _threadNames[data.ThreadID] = data.ThreadName;
+                if (seenProcessIds.Add(processId))
+                {
+                    dedupedProcessIds.Add(processId);
+                }
             }
-        };
-        _etl.Process();
+            processIds = dedupedProcessIds;
+        }
 
         _profileThreadIndex = 0;
 
+        var threadContexts = new Dictionary<TraceThread, ThreadConvertContext>();
+        var processStates = new List<ProcessConvertState>(processIds.Count);
+
+        // Phase 1: Setup, per process, in the same order as today. This creates every
+        // FirefoxProfiler.Thread and its per-thread context up front, so that phase 2 below can
+        // run as a single pass over the whole trace instead of one pass per thread.
         foreach (var processId in processIds)
         {
             var process = _traceLog.Processes.LastProcessWithID(processId);
+            processStates.Add(SetupProcess(process, threadContexts));
+        }
 
-            ConvertProcess(process);
+        // Phase 2: a single pass over the entire trace. TraceThread.EventsInThread is
+        // implemented as Log.Events.Filter(startTimeQPC, endTimeQPC, e => e.ThreadID ==
+        // ThreadID) - a linear scan with full per-event decode that merely seeks to the
+        // thread's start time, so calling it once per thread (the previous shape of this method)
+        // is O(threads x events). Routing every event once to its owning thread's context here
+        // makes the whole conversion O(events) total.
+        //
+        // This phase dominates wall time on a large trace and, unlike phases 1/3, previously emitted no
+        // progress output at all while it ran - the status line would sit frozen for minutes and read as
+        // a hang. Report progress every ProgressLogEventInterval events instead: a plain counter/modulo
+        // check is allocation-free, and the message itself (the only allocation) is only formatted on the
+        // rare iterations where it is actually logged.
+        long eventsProcessed = 0;
+        foreach (var evt in _traceLog.Events)
+        {
+            eventsProcessed++;
+            if (eventsProcessed % ProgressLogEventInterval == 0)
+            {
+                Options.LogStepProgress?.Invoke($"Converting Events: {eventsProcessed:N0} processed");
+            }
+
+            // Thread names come from ThreadSetName kernel events. TraceLog drops many bookkeeping
+            // events while building the .etlx (all stack-walk events, Thread/DCStart|DCStop,
+            // MethodILToNativeMap, non-jitted MethodLoad*, FileIO/Name, idle-thread PerfInfo/Sample, to
+            // name some) - but ThreadSetName is not one of them: its SetupCallbacks handler sets neither
+            // bookKeepingEvent nor removeFromStream, so it survives into _traceLog.Events like an
+            // ordinary event (this is also how TraceLog itself seeds TraceThread.ThreadInfo). That lets
+            // collecting it piggy-back on this single pass instead of requiring a second full pass over
+            // the raw .etl file (which is what the previous ETWTraceEventSource.Process() call was
+            // solely for). Collection is intentionally unconditional - not scoped to threads we are
+            // converting - to match the old behavior of scanning the whole raw file regardless of
+            // `processIds`.
+            if (evt is ThreadSetNameTraceData threadSetName)
+            {
+                if (!string.IsNullOrEmpty(threadSetName.ThreadName))
+                {
+                    _threadNames[threadSetName.ThreadID] = threadSetName.ThreadName;
+                }
+            }
+
+            // Thread IDs can be reused during a trace. TraceThread carries the timestamped lifetime;
+            // ThreadID alone can merge unrelated lifetimes into one Firefox thread. evt.Thread()
+            // resolves the owning TraceThread via TraceLogExtensions.Thread() ->
+            // Threads.GetThread(ThreadID, TimeStampQPC), which returns the last TraceThread history
+            // entry with startTime <= t. That reproduces the LOWER bound of the old per-thread
+            // `ReferenceEquals(evt.Thread(), thread)` guard (an event is never attributed to a
+            // TraceThread that starts after it) but NOT its upper bound: the old EventsInThread
+            // enumerator also stopped at `t > endTimeQPC`, whereas GetThread never consults an end time
+            // at all. So an event bearing a dead thread's TID after that thread's Thread/End, with no
+            // newer TraceThread registered for the same TID yet, is now routed to the dead thread
+            // instead of being dropped - a divergence from the old behavior that is accepted here:
+            // UltraProfilerEtw.cs enables the kernel Thread keyword, so TID reuse registers a new
+            // TraceThread and closes the window in the only realistic case; no failing scenario without
+            // TID reuse could be constructed; and the only upper bound available here
+            // (EndTimeRelativeMSec) is a double derived from the QPC value, so comparing against it
+            // risks dropping events exactly at the boundary - a worse bug than the one it would close.
+            var thread = evt.Thread();
+            if (thread is null || !threadContexts.TryGetValue(thread, out var context))
+            {
+                continue;
+            }
+
+            ProcessEvent(evt, context);
+        }
+
+        // Phase 3: Finalize, per process, in the same order as today. By now _threadNames is
+        // fully populated (phase 2 has already scanned every event in the trace), so thread names
+        // can be computed here.
+        foreach (var state in processStates)
+        {
+            FinalizeProcess(state);
         }
     }
 
     /// <summary>
-    /// Converts an ETW trace process to a Firefox profile.
+    /// Mutable per-thread conversion state for a single <see cref="FirefoxProfiler.Thread"/>.
+    /// These fields used to be instance fields (and loop locals) cleared/reset at the top of each
+    /// iteration of a per-thread loop that processed one thread fully before moving to the next.
+    /// Now that every thread's events are interleaved by a single time-ordered pass over the
+    /// whole trace, each thread needs its own persistent copy instead of one shared, reset-per-
+    /// iteration copy - so every thread's context is alive for the whole conversion instead of
+    /// one at a time. This trades memory for eliminating the O(threads x events) rescans;
+    /// deliberately no pooling/cleverness is added here.
     /// </summary>
-    /// <param name="process">The process to convert.</param>
-    private void ConvertProcess(TraceProcess process)
+    private sealed class ThreadConvertContext
+    {
+        public ThreadConvertContext(
+            TraceProcess process,
+            TraceThread thread,
+            FirefoxProfiler.Thread profileThread,
+            ProcessModuleContext processModules,
+            int threadIndex,
+            int profileThreadIndex,
+            List<(double, GCHeapStatsEvent)> gcHeapStatsEvents,
+            Dictionary<long, (JitCompileEvent, double)> jitCompilePendingMethodId)
+        {
+            Process = process;
+            Thread = thread;
+            ProfileThread = profileThread;
+            ProcessModules = processModules;
+            ThreadIndex = threadIndex;
+            ProfileThreadIndex = profileThreadIndex;
+            GcHeapStatsEvents = gcHeapStatsEvents;
+            JitCompilePendingMethodId = jitCompilePendingMethodId;
+        }
+
+        public TraceProcess Process { get; }
+        public TraceThread Thread { get; }
+        public FirefoxProfiler.Thread ProfileThread { get; }
+        public ProcessModuleContext ProcessModules { get; }
+
+        /// <summary>The position of this thread within its process's CPU-time-sorted thread list.</summary>
+        public int ThreadIndex { get; }
+
+        /// <summary>The index of this thread's <see cref="FirefoxProfiler.Thread"/> within <c>ProfilerResult.Threads</c>.</summary>
+        public int ProfileThreadIndex { get; }
+
+        /// <summary>
+        /// Shared by every thread context of the same process (same list instance); appended to
+        /// during the event pass and sorted by timestamp afterwards in <see cref="FinalizeProcess"/>,
+        /// exactly as before.
+        /// </summary>
+        public List<(double, GCHeapStatsEvent)> GcHeapStatsEvents { get; }
+
+        public Dictionary<CallStackIndex, int> MapCallStackIndexToFirefox { get; } = new();
+        public Dictionary<CodeAddressIndex, int> MapCodeAddressIndexToFirefox { get; } = new();
+        public Dictionary<CodeAddressIndex, int> MapCodeAddressIndexToMethodIndexFirefox { get; } = new();
+        public Dictionary<MethodIndex, int> MapMethodIndexToFirefox { get; } = new();
+        public Dictionary<string, int> MapStringToFirefox { get; } = new(StringComparer.Ordinal);
+
+        public Stack<(double, GCSuspendExecutionEngineEvent)> GcSuspendEEEvents { get; } = new();
+        public Stack<double> GcRestartEEEvents { get; } = new();
+        public Stack<(double, GCEvent)> GcStartStopEvents { get; } = new();
+
+        /// <summary>
+        /// Shared by every thread context of the same process (same dictionary instance, mirroring
+        /// <see cref="GcHeapStatsEvents"/> above) - this must stay per-PROCESS, not per-thread. A
+        /// MethodJittingStarted event and the MethodLoadUnload event for the same MethodID are not
+        /// guaranteed to occur on the same OS thread (e.g. background tiered-JIT compilation can hand a
+        /// method off to a different thread than the one that ends up loading it), so a per-thread
+        /// dictionary would silently DROP those cross-thread markers instead of merely reordering them.
+        /// The old code (one dictionary per process, one thread converted fully at a time) genuinely did
+        /// cross-thread matching, but only worked when the jitting thread happened to be converted before
+        /// the loading thread in the old CPU-time-sorted, thread-grouped iteration order - it silently
+        /// failed the rest of the time. This single time-ordered pass over the whole trace makes
+        /// per-process matching work consistently instead of by accident, so this preserves strictly MORE
+        /// markers than either the old ordering-dependent behavior or a per-thread-scoped version of this
+        /// same pass would.
+        /// </summary>
+        public Dictionary<long, (JitCompileEvent, double)> JitCompilePendingMethodId { get; }
+
+        public double StartTime;
+        public double SwitchTimeInMsec;
+
+        /// <summary>
+        /// Releases the backing storage of this thread's interning dictionaries once
+        /// <see cref="ProfileThread"/> is fully built (called from <c>FinalizeProcess</c>, after
+        /// <c>RepairIsolatedIncompleteStacks</c>), so it can be collected during the JSON+gzip
+        /// serialization that follows instead of staying live - together with every other thread's -
+        /// for the rest of the conversion. <see cref="Dictionary{TKey,TValue}.Clear"/> alone would drop
+        /// the entries but not shrink the backing arrays; the paired <c>TrimExcess()</c> call (capacity
+        /// down to the now-zero count) is what actually releases that memory. No pooling: these
+        /// dictionaries are never read again after this point.
+        /// </summary>
+        public void ReleaseInterningMaps()
+        {
+            MapCallStackIndexToFirefox.Clear();
+            MapCallStackIndexToFirefox.TrimExcess();
+            MapCodeAddressIndexToFirefox.Clear();
+            MapCodeAddressIndexToFirefox.TrimExcess();
+            MapCodeAddressIndexToMethodIndexFirefox.Clear();
+            MapCodeAddressIndexToMethodIndexFirefox.TrimExcess();
+            MapMethodIndexToFirefox.Clear();
+            MapMethodIndexToFirefox.TrimExcess();
+            MapStringToFirefox.Clear();
+            MapStringToFirefox.TrimExcess();
+        }
+    }
+
+    /// <summary>
+    /// Per-process module classification (managed-module set and clrjit/coreclr module indices)
+    /// used while converting frames. <see cref="LoadModules"/> used to reset shared instance
+    /// fields for this on every call, which was safe only because processes were converted fully,
+    /// one at a time. Now that setup for every process runs before the single shared event pass,
+    /// these can no longer be shared mutable instance state - they would end up reflecting only
+    /// the last process set up - so each process gets its own instance instead, referenced by
+    /// every one of its threads' <see cref="ThreadConvertContext"/>.
+    /// </summary>
+    private sealed class ProcessModuleContext
+    {
+        public ProcessModuleContext(HashSet<ModuleFileIndex> managedModules, ModuleFileIndex clrJitModuleIndex, ModuleFileIndex coreClrModuleIndex)
+        {
+            ManagedModules = managedModules;
+            ClrJitModuleIndex = clrJitModuleIndex;
+            CoreClrModuleIndex = coreClrModuleIndex;
+        }
+
+        public HashSet<ModuleFileIndex> ManagedModules { get; }
+        public ModuleFileIndex ClrJitModuleIndex { get; }
+        public ModuleFileIndex CoreClrModuleIndex { get; }
+    }
+
+    /// <summary>Per-process state carried from the setup phase (1) to the finalize phase (3).</summary>
+    private sealed class ProcessConvertState
+    {
+        public ProcessConvertState(
+            TraceProcess process,
+            List<ThreadConvertContext> threadContexts,
+            List<(double, GCHeapStatsEvent)> gcHeapStatsEvents,
+            int threadIndexWithMaxCpuTime,
+            List<int> initialVisibleThreads,
+            List<int> initialSelectedThreads)
+        {
+            Process = process;
+            ThreadContexts = threadContexts;
+            GcHeapStatsEvents = gcHeapStatsEvents;
+            ThreadIndexWithMaxCpuTime = threadIndexWithMaxCpuTime;
+            InitialVisibleThreads = initialVisibleThreads;
+            InitialSelectedThreads = initialSelectedThreads;
+        }
+
+        public TraceProcess Process { get; }
+        public List<ThreadConvertContext> ThreadContexts { get; }
+        public List<(double, GCHeapStatsEvent)> GcHeapStatsEvents { get; }
+        public int ThreadIndexWithMaxCpuTime { get; }
+
+        /// <summary>
+        /// The profile-thread indices to mark visible by default for this process, computed by
+        /// <see cref="ThreadVisibilityPlanner.Plan"/> in <see cref="SetupProcess"/> and appended to
+        /// <c>ProfilerResult.Meta.InitialVisibleThreads</c> by <see cref="FinalizeProcess"/>.
+        /// </summary>
+        public List<int> InitialVisibleThreads { get; }
+
+        /// <summary>
+        /// The profile-thread indices to select by default for this process, computed by
+        /// <see cref="ThreadVisibilityPlanner.Plan"/> in <see cref="SetupProcess"/> and appended to
+        /// <c>ProfilerResult.Meta.InitialSelectedThreads</c> by <see cref="FinalizeProcess"/>.
+        /// </summary>
+        public List<int> InitialSelectedThreads { get; }
+    }
+
+    /// <summary>
+    /// Prepares a process for conversion: updates profile-wide metadata, loads its modules and
+    /// symbols, and creates a <see cref="FirefoxProfiler.Thread"/> plus a per-thread conversion
+    /// context for each of its threads, in the same order threads were processed in before.
+    /// </summary>
+    /// <param name="process">The process to prepare.</param>
+    /// <param name="threadContexts">The shared thread-to-context map that phase 2 routes events through.</param>
+    /// <returns>The per-process state needed by <see cref="FinalizeProcess"/>.</returns>
+    private ProcessConvertState SetupProcess(TraceProcess process, Dictionary<TraceThread, ThreadConvertContext> threadContexts)
     {
         if (ProfilerResult.Meta.Product == string.Empty)
         {
@@ -125,51 +377,49 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             ProfilerResult.Meta.ProfilingEndTime = profilingEndTime;
         }
 
-        LoadModules(process);
+        var processModules = LoadModules(process);
 
+        // Stays per-process: entries are appended (from every one of the process's threads)
+        // during the single event pass in time order rather than thread-grouped order, then
+        // sorted by timestamp immediately below in FinalizeProcess exactly as before - so the
+        // result is unchanged except possibly for ties.
         List<(double, GCHeapStatsEvent)> gcHeapStatsEvents = new();
+
+        // Shared by every thread context of this process (see
+        // ThreadConvertContext.JitCompilePendingMethodId for why this must be per-process, not
+        // per-thread).
         Dictionary<long, (JitCompileEvent, double)> jitCompilePendingMethodId = new();
 
-        // Sort threads by CPU time
-        var threads = process.Threads.ToList();
-        threads.Sort((a, b) => b.CPUMSec.CompareTo(a.CPUMSec));
-        
-        double maxCpuTime = threads.Count > 0 ? threads[0].CPUMSec : 0;
-        int threadIndexWithMaxCpuTime = threads.Count > 0 ? _profileThreadIndex : -1;
+        var originalThreads = process.Threads.ToList();
+        var cpuTimesInMs = new double[originalThreads.Count];
+        for (var i = 0; i < originalThreads.Count; i++)
+        {
+            cpuTimesInMs[i] = originalThreads[i].CPUMSec;
+        }
+
+        // The CPU-descending thread order, each thread's resulting profile-thread index, and the
+        // profile's default visible/selected threads are computed by a pure, independently unit-tested
+        // helper (see ThreadVisibilityPlanner) - these are exactly the kind of thing a refactor can
+        // silently get wrong without any test noticing, since the only symptom is a reordered/reindexed
+        // array deep inside the serialized profile JSON.
+        var visibilityPlan = ThreadVisibilityPlanner.Plan(cpuTimesInMs, _profileThreadIndex, Options.MinimumCpuTimeBeforeThreadIsVisibleInMs);
 
         var processName = $"{process.Name} ({process.ProcessID})";
 
-        // Add threads
-        for (var threadIndex = 0; threadIndex < threads.Count; threadIndex++)
+        var threadContextList = new List<ThreadConvertContext>(originalThreads.Count);
+
+        // Add threads, in the CPU-descending order the plan computed.
+        for (var threadIndex = 0; threadIndex < visibilityPlan.SortOrder.Length; threadIndex++)
         {
-            var thread = threads[threadIndex];
+            var thread = originalThreads[visibilityPlan.SortOrder[threadIndex]];
 
-            _mapCallStackIndexToFirefox.Clear();
-            _mapCodeAddressIndexToFirefox.Clear();
-            _mapMethodIndexToFirefox.Clear();
-            _mapStringToFirefox.Clear();
-            _mapCodeAddressIndexToMethodIndexFirefox.Clear();
-
-            Stack<(double, GCSuspendExecutionEngineEvent)> gcSuspendEEEvents = new();
-            Stack<double> gcRestartEEEvents = new();
-            Stack<(double, GCEvent)> gcStartStopEvents = new();
-
-            string threadBaseName;
-            if (!_threadNames.TryGetValue(thread.ThreadID, out var dynamicThreadName))
-            {
-                threadBaseName = thread.ThreadInfo is not null
-                    ? $"{thread.ThreadInfo} ({thread.ThreadID})"
-                    : $"Thread ({thread.ThreadID})";
-            }
-            else
-            {
-                threadBaseName = $"{dynamicThreadName} ({thread.ThreadID})";
-            }
-            var threadName = $"{threadIndex} - {threadBaseName}";
-                
+            // Name depends on _threadNames, which is only fully known after phase 2 has scanned
+            // the whole trace (thread names must be known before Thread.Name is computed - see
+            // Step 4 of the perf plan). Left empty here and computed for real in
+            // FinalizeProcess, once that is guaranteed.
             var profileThread = new FirefoxProfiler.Thread
             {
-                Name = threadName,
+                Name = string.Empty,
                 ProcessName = processName,
                 ProcessStartupTime = thread.StartTimeRelativeMSec,
                 RegisterTime = thread.StartTimeRelativeMSec,
@@ -181,291 +431,346 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                 ShowMarkersInTimeline = true
             };
 
-            Options.LogProgress?.Invoke($"Converting Events for Thread: {profileThread.Name}");
-
             var samples = profileThread.Samples;
-            var markers = profileThread.Markers;
-
             samples.ThreadCPUDelta = new List<int?>();
             samples.TimeDeltas = new List<double>();
             samples.WeightType = "samples";
 
-            //const TraceEventID GCStartEventID = (TraceEventID) 1;
-            //const TraceEventID GCStopEventID = (TraceEventID) 2;
-            const TraceEventID GCRestartEEStopEventID = (TraceEventID) 3;
-            //const TraceEventID GCHeapStatsEventID = (TraceEventID) 4;
-            //const TraceEventID GCCreateSegmentEventID = (TraceEventID) 5;
-            //const TraceEventID GCFreeSegmentEventID = (TraceEventID) 6;
-            const TraceEventID GCRestartEEStartEventID = (TraceEventID) 7;
-            const TraceEventID GCSuspendEEStopEventID = (TraceEventID) 8;
-            //const TraceEventID GCSuspendEEStartEventID = (TraceEventID) 9;
-            //const TraceEventID GCAllocationTickEventID = (TraceEventID) 10;
+            // _profileThreadIndex is the base index passed into ThreadVisibilityPlanner.Plan above, plus
+            // the number of threads already added in this loop (threadIndex): i.e. exactly
+            // visibilityPlan.ProfileThreadIndexByOriginalIndex[visibilityPlan.SortOrder[threadIndex]].
+            var context = new ThreadConvertContext(process, thread, profileThread, processModules, threadIndex, _profileThreadIndex, gcHeapStatsEvents, jitCompilePendingMethodId);
 
-            double startTime = 0;
-            double switchTimeInMsec = 0.0;
-            //double switchTimeOutMsec = 0.0;
-            foreach (var evt in thread.EventsInThread)
-            {
-                // Thread IDs can be reused during a trace. TraceThread carries the timestamped
-                // lifetime; ThreadID alone can merge unrelated lifetimes into one Firefox thread.
-                if (!ReferenceEquals(evt.Thread(), thread))
-                {
-                    continue;
-                }
-
-                if (evt is not SampledProfileTraceData)
-                {
-                    if (evt.Opcode == (TraceEventOpcode) 0x24 && evt is CSwitchTraceData switchTraceData)
-                    {
-                        if (evt.ThreadID == thread.ThreadID && switchTraceData.OldThreadID != thread.ThreadID)
-                        {
-                            // Old Thread -> This Thread
-                            // Switch-in
-                            switchTimeInMsec = evt.TimeStampRelativeMSec;
-                        }
-                        //else if (evt.ThreadID != thread.ThreadID && switchTraceData.OldThreadID == thread.ThreadID)
-                        //{
-                        //    // This Thread -> Other Thread
-                        //    // Switch-out
-                        //    switchTimeOutMsec = evt.TimeStampRelativeMSec;
-                        //}
-                    }
-
-                    if (evt.ThreadID == thread.ThreadID)
-                    {
-                        if (evt is MethodJittingStartedTraceData methodJittingStarted)
-                        {
-                            var signature = methodJittingStarted.MethodSignature;
-                            var indexOfParent = signature.IndexOf('(');
-                            if (indexOfParent >= 0)
-                            {
-                                signature = signature.Substring(indexOfParent);
-                            }
-
-                            var jitCompile = new JitCompileEvent
-                            {
-                                FullName =
-                                    $"{methodJittingStarted.MethodNamespace}.{methodJittingStarted.MethodName}{signature}",
-                                MethodILSize = methodJittingStarted.MethodILSize
-                            };
-
-                            jitCompilePendingMethodId[methodJittingStarted.MethodID] =
-                                (jitCompile, evt.TimeStampRelativeMSec);
-                        }
-                        else if (evt is MethodLoadUnloadTraceDataBase methodLoadUnloadVerbose)
-                        {
-                            if (jitCompilePendingMethodId.TryGetValue(methodLoadUnloadVerbose.MethodID,
-                                    out var jitCompilePair))
-                            {
-                                jitCompilePendingMethodId.Remove(methodLoadUnloadVerbose.MethodID);
-
-                                markers.StartTime.Add(jitCompilePair.Item2);
-                                markers.EndTime.Add(evt.TimeStampRelativeMSec);
-                                markers.Category.Add(CategoryJit);
-                                markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
-                                markers.ThreadId.Add(_profileThreadIndex);
-                                markers.Name.Add(GetOrCreateString("JitCompile", profileThread));
-                                markers.Data.Add(jitCompilePair.Item1);
-                                markers.Length++;
-                            }
-                        }
-                        else if (evt is GCHeapStatsTraceData gcHeapStats)
-                        {
-                            markers.StartTime.Add(evt.TimeStampRelativeMSec);
-                            markers.EndTime.Add(evt.TimeStampRelativeMSec);
-                            markers.Category.Add(CategoryGc);
-                            markers.Phase.Add(FirefoxProfiler.MarkerPhase.Instance);
-                            markers.ThreadId.Add(_profileThreadIndex);
-                            markers.Name.Add(GetOrCreateString($"GCHeapStats", profileThread));
-
-                            var heapStatEvent = new GCHeapStatsEvent
-                            {
-                                TotalHeapSize = gcHeapStats.TotalHeapSize,
-                                TotalPromoted = gcHeapStats.TotalPromoted,
-                                GenerationSize0 = gcHeapStats.GenerationSize0,
-                                TotalPromotedSize0 = gcHeapStats.TotalPromotedSize0,
-                                GenerationSize1 = gcHeapStats.GenerationSize1,
-                                TotalPromotedSize1 = gcHeapStats.TotalPromotedSize1,
-                                GenerationSize2 = gcHeapStats.GenerationSize2,
-                                TotalPromotedSize2 = gcHeapStats.TotalPromotedSize2,
-                                GenerationSize3 = gcHeapStats.GenerationSize3,
-                                TotalPromotedSize3 = gcHeapStats.TotalPromotedSize3,
-                                GenerationSize4 = gcHeapStats.GenerationSize4,
-                                TotalPromotedSize4 = gcHeapStats.TotalPromotedSize4,
-                                FinalizationPromotedSize = gcHeapStats.FinalizationPromotedSize,
-                                FinalizationPromotedCount = gcHeapStats.FinalizationPromotedCount,
-                                PinnedObjectCount = gcHeapStats.PinnedObjectCount,
-                                SinkBlockCount = gcHeapStats.SinkBlockCount,
-                                GCHandleCount = gcHeapStats.GCHandleCount
-                            };
-
-                            gcHeapStatsEvents.Add((evt.TimeStampRelativeMSec, heapStatEvent));
-
-                            markers.Data.Add(heapStatEvent);
-                            markers.Length++;
-                        }
-                        else if (evt is GCAllocationTickTraceData allocationTick)
-                        {
-                            markers.StartTime.Add(evt.TimeStampRelativeMSec);
-                            markers.EndTime.Add(evt.TimeStampRelativeMSec);
-                            markers.Category.Add(CategoryGc);
-                            markers.Phase.Add(FirefoxProfiler.MarkerPhase.Instance);
-                            markers.ThreadId.Add(_profileThreadIndex);
-                            markers.Name.Add(GetOrCreateString($"{threadIndex} - GC Alloc ({thread.ThreadID})", profileThread));
-
-                            var allocationTickEvent = new GCAllocationTickEvent
-                            {
-                                AllocationAmount = allocationTick.AllocationAmount,
-                                AllocationKind = allocationTick.AllocationKind switch
-                                {
-                                    GCAllocationKind.Small => "Small",
-                                    GCAllocationKind.Large => "Large",
-                                    GCAllocationKind.Pinned => "Pinned",
-                                    _ => "Unknown"
-                                },
-                                TypeName = allocationTick.TypeName,
-                                HeapIndex = allocationTick.HeapIndex
-                            };
-                            markers.Data.Add(allocationTickEvent);
-                            markers.Length++;
-                        }
-                        else if (evt.ProviderGuid == ClrTraceEventParser.ProviderGuid)
-                        {
-                            if (evt is GCStartTraceData gcStart)
-                            {
-                                var gcEvent = new GCEvent
-                                {
-                                    Reason = gcStart.Reason.ToString(),
-                                    Count = gcStart.Count,
-                                    Depth = gcStart.Depth,
-                                    GCType = gcStart.Type.ToString()
-                                };
-
-                                gcStartStopEvents.Push((evt.TimeStampRelativeMSec, gcEvent));
-                            }
-                            else if (evt is GCEndTraceData gcEnd && gcStartStopEvents.Count > 0)
-                            {
-                                var (gcEventStartTime, gcEvent) = gcStartStopEvents.Pop();
-
-                                markers.StartTime.Add(gcEventStartTime);
-                                markers.EndTime.Add(evt.TimeStampRelativeMSec);
-                                markers.Category.Add(CategoryGc);
-                                markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
-                                markers.ThreadId.Add(_profileThreadIndex);
-                                markers.Name.Add(GetOrCreateString($"GC Event", profileThread));
-                                markers.Data.Add(gcEvent);
-                                markers.Length++;
-                            }
-                            else if (evt is GCSuspendEETraceData gcSuspendEE)
-                            {
-                                var gcSuspendEEEvent = new GCSuspendExecutionEngineEvent
-                                {
-                                    Reason = gcSuspendEE.Reason.ToString(),
-                                    Count = gcSuspendEE.Count
-                                };
-
-                                gcSuspendEEEvents.Push((evt.TimeStampRelativeMSec, gcSuspendEEEvent));
-                            }
-                            else if (evt.ID == GCSuspendEEStopEventID && evt is GCNoUserDataTraceData &&
-                                     gcSuspendEEEvents.Count > 0)
-                            {
-                                var (gcSuspendEEEventStartTime, gcSuspendEEEvent) = gcSuspendEEEvents.Pop();
-
-                                markers.StartTime.Add(gcSuspendEEEventStartTime);
-                                markers.EndTime.Add(evt.TimeStampRelativeMSec);
-                                markers.Category.Add(CategoryGc);
-                                markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
-                                markers.ThreadId.Add(_profileThreadIndex);
-                                markers.Name.Add(GetOrCreateString($"GC Suspend EE", profileThread));
-                                markers.Data.Add(gcSuspendEEEvent);
-                                markers.Length++;
-                            }
-                            else if (evt.ID == GCRestartEEStartEventID && evt is GCNoUserDataTraceData)
-                            {
-                                gcRestartEEEvents.Push(evt.TimeStampRelativeMSec);
-                            }
-                            else if (evt.ID == GCRestartEEStopEventID && evt is GCNoUserDataTraceData &&
-                                     gcRestartEEEvents.Count > 0)
-                            {
-                                var gcRestartEEEventStartTime = gcRestartEEEvents.Pop();
-
-                                markers.StartTime.Add(gcRestartEEEventStartTime);
-                                markers.EndTime.Add(evt.TimeStampRelativeMSec);
-                                markers.Category.Add(CategoryGc);
-                                markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
-                                markers.ThreadId.Add(_profileThreadIndex);
-                                markers.Name.Add(GetOrCreateString($"GC Restart EE", profileThread));
-                                markers.Data.Add(null);
-                                markers.Length++;
-                            }
-                        }
-                    }
-
-                    continue;
-                }
-
-                if (evt.ProcessID != process.ProcessID || evt.ThreadID != thread.ThreadID)
-                {
-                    continue;
-                }
-
-                //Console.WriteLine($"PERF {evt}");
-
-                var callStackIndex = evt.CallStackIndex();
-                if (callStackIndex == CallStackIndex.Invalid)
-                {
-                    continue;
-                }
-
-                if (!ReferenceEquals(_traceLog.CallStacks.Thread(callStackIndex), thread))
-                {
-                    continue;
-                }
-
-                // Add sample
-                var firefoxCallStackIndex = ConvertCallStack(callStackIndex, profileThread);
-
-                var deltaTime = evt.TimeStampRelativeMSec - startTime;
-                samples.TimeDeltas.Add(deltaTime);
-                samples.Stack.Add(firefoxCallStackIndex);
-                var cpuDeltaMs = (long) ((evt.TimeStampRelativeMSec - switchTimeInMsec) * 1_000_000.0);
-                if (cpuDeltaMs > 0)
-                {
-                    samples.ThreadCPUDelta.Add((int) cpuDeltaMs);
-                }
-                else
-                {
-                    samples.ThreadCPUDelta.Add(0);
-                }
-
-                switchTimeInMsec = evt.TimeStampRelativeMSec;
-                samples.Length++;
-                startTime = evt.TimeStampRelativeMSec;
-            }
-
-            RepairIsolatedIncompleteStacks(profileThread);
+            threadContexts.Add(thread, context);
+            threadContextList.Add(context);
 
             ProfilerResult.Threads.Add(profileThread);
-
-            // Make visible threads in the UI that consume a minimum amount of CPU time
-            if (thread.CPUMSec > Options.MinimumCpuTimeBeforeThreadIsVisibleInMs)
-            {
-                ProfilerResult.Meta.InitialVisibleThreads!.Add(_profileThreadIndex);
-            }
-
-            // We will select by default the thread that has the maximum activity
-            if (thread.CPUMSec > maxCpuTime)
-            {
-                maxCpuTime = thread.CPUMSec;
-                threadIndexWithMaxCpuTime = _profileThreadIndex;
-            }
 
             _profileThreadIndex++;
         }
 
-        // If we have GCHeapStatsEvents, we can create a Memory track
-        if (gcHeapStatsEvents.Count > 0)
+        return new ProcessConvertState(process, threadContextList, gcHeapStatsEvents, visibilityPlan.ThreadIndexWithMaxCpuTime, visibilityPlan.InitialVisibleThreads, visibilityPlan.InitialSelectedThreads);
+    }
+
+    /// <summary>
+    /// Applies the conversion logic for a single trace event to the thread that owns it. This is
+    /// exactly the per-event body that used to run once per thread inside <c>foreach (var evt in
+    /// thread.EventsInThread)</c>, unchanged except that it reads and writes per-thread state
+    /// through <paramref name="context"/> instead of instance fields and loop locals.
+    /// </summary>
+    private void ProcessEvent(TraceEvent evt, ThreadConvertContext context)
+    {
+        var thread = context.Thread;
+        var process = context.Process;
+        var profileThread = context.ProfileThread;
+        var samples = profileThread.Samples;
+        var markers = profileThread.Markers;
+
+        //const TraceEventID GCStartEventID = (TraceEventID) 1;
+        //const TraceEventID GCStopEventID = (TraceEventID) 2;
+        const TraceEventID GCRestartEEStopEventID = (TraceEventID) 3;
+        //const TraceEventID GCHeapStatsEventID = (TraceEventID) 4;
+        //const TraceEventID GCCreateSegmentEventID = (TraceEventID) 5;
+        //const TraceEventID GCFreeSegmentEventID = (TraceEventID) 6;
+        const TraceEventID GCRestartEEStartEventID = (TraceEventID) 7;
+        const TraceEventID GCSuspendEEStopEventID = (TraceEventID) 8;
+        //const TraceEventID GCSuspendEEStartEventID = (TraceEventID) 9;
+        //const TraceEventID GCAllocationTickEventID = (TraceEventID) 10;
+
+        if (evt is not SampledProfileTraceData)
         {
+            if (evt.Opcode == (TraceEventOpcode) 0x24 && evt is CSwitchTraceData switchTraceData)
+            {
+                if (evt.ThreadID == thread.ThreadID && switchTraceData.OldThreadID != thread.ThreadID)
+                {
+                    // Old Thread -> This Thread
+                    // Switch-in
+                    context.SwitchTimeInMsec = evt.TimeStampRelativeMSec;
+                }
+                //else if (evt.ThreadID != thread.ThreadID && switchTraceData.OldThreadID == thread.ThreadID)
+                //{
+                //    // This Thread -> Other Thread
+                //    // Switch-out
+                //    switchTimeOutMsec = evt.TimeStampRelativeMSec;
+                //}
+            }
+
+            if (evt.ThreadID == thread.ThreadID)
+            {
+                if (evt is MethodJittingStartedTraceData methodJittingStarted)
+                {
+                    var signature = methodJittingStarted.MethodSignature;
+                    var indexOfParent = signature.IndexOf('(');
+                    if (indexOfParent >= 0)
+                    {
+                        signature = signature.Substring(indexOfParent);
+                    }
+
+                    var jitCompile = new JitCompileEvent
+                    {
+                        FullName =
+                            $"{methodJittingStarted.MethodNamespace}.{methodJittingStarted.MethodName}{signature}",
+                        MethodILSize = methodJittingStarted.MethodILSize
+                    };
+
+                    context.JitCompilePendingMethodId[methodJittingStarted.MethodID] =
+                        (jitCompile, evt.TimeStampRelativeMSec);
+                }
+                else if (evt is MethodLoadUnloadTraceDataBase methodLoadUnloadVerbose)
+                {
+                    if (context.JitCompilePendingMethodId.TryGetValue(methodLoadUnloadVerbose.MethodID,
+                            out var jitCompilePair))
+                    {
+                        context.JitCompilePendingMethodId.Remove(methodLoadUnloadVerbose.MethodID);
+
+                        markers.StartTime.Add(jitCompilePair.Item2);
+                        markers.EndTime.Add(evt.TimeStampRelativeMSec);
+                        markers.Category.Add(CategoryJit);
+                        markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
+                        markers.ThreadId.Add(context.ProfileThreadIndex);
+                        markers.Name.Add(GetOrCreateString("JitCompile", context));
+                        markers.Data.Add(jitCompilePair.Item1);
+                        markers.Length++;
+                    }
+                }
+                else if (evt is GCHeapStatsTraceData gcHeapStats)
+                {
+                    markers.StartTime.Add(evt.TimeStampRelativeMSec);
+                    markers.EndTime.Add(evt.TimeStampRelativeMSec);
+                    markers.Category.Add(CategoryGc);
+                    markers.Phase.Add(FirefoxProfiler.MarkerPhase.Instance);
+                    markers.ThreadId.Add(context.ProfileThreadIndex);
+                    markers.Name.Add(GetOrCreateString($"GCHeapStats", context));
+
+                    var heapStatEvent = new GCHeapStatsEvent
+                    {
+                        TotalHeapSize = gcHeapStats.TotalHeapSize,
+                        TotalPromoted = gcHeapStats.TotalPromoted,
+                        GenerationSize0 = gcHeapStats.GenerationSize0,
+                        TotalPromotedSize0 = gcHeapStats.TotalPromotedSize0,
+                        GenerationSize1 = gcHeapStats.GenerationSize1,
+                        TotalPromotedSize1 = gcHeapStats.TotalPromotedSize1,
+                        GenerationSize2 = gcHeapStats.GenerationSize2,
+                        TotalPromotedSize2 = gcHeapStats.TotalPromotedSize2,
+                        GenerationSize3 = gcHeapStats.GenerationSize3,
+                        TotalPromotedSize3 = gcHeapStats.TotalPromotedSize3,
+                        GenerationSize4 = gcHeapStats.GenerationSize4,
+                        TotalPromotedSize4 = gcHeapStats.TotalPromotedSize4,
+                        FinalizationPromotedSize = gcHeapStats.FinalizationPromotedSize,
+                        FinalizationPromotedCount = gcHeapStats.FinalizationPromotedCount,
+                        PinnedObjectCount = gcHeapStats.PinnedObjectCount,
+                        SinkBlockCount = gcHeapStats.SinkBlockCount,
+                        GCHandleCount = gcHeapStats.GCHandleCount
+                    };
+
+                    context.GcHeapStatsEvents.Add((evt.TimeStampRelativeMSec, heapStatEvent));
+
+                    markers.Data.Add(heapStatEvent);
+                    markers.Length++;
+                }
+                else if (evt is GCAllocationTickTraceData allocationTick)
+                {
+                    markers.StartTime.Add(evt.TimeStampRelativeMSec);
+                    markers.EndTime.Add(evt.TimeStampRelativeMSec);
+                    markers.Category.Add(CategoryGc);
+                    markers.Phase.Add(FirefoxProfiler.MarkerPhase.Instance);
+                    markers.ThreadId.Add(context.ProfileThreadIndex);
+                    markers.Name.Add(GetOrCreateString($"{context.ThreadIndex} - GC Alloc ({thread.ThreadID})", context));
+
+                    var allocationTickEvent = new GCAllocationTickEvent
+                    {
+                        AllocationAmount = allocationTick.AllocationAmount,
+                        AllocationKind = allocationTick.AllocationKind switch
+                        {
+                            GCAllocationKind.Small => "Small",
+                            GCAllocationKind.Large => "Large",
+                            GCAllocationKind.Pinned => "Pinned",
+                            _ => "Unknown"
+                        },
+                        TypeName = allocationTick.TypeName,
+                        HeapIndex = allocationTick.HeapIndex
+                    };
+                    markers.Data.Add(allocationTickEvent);
+                    markers.Length++;
+                }
+                else if (evt.ProviderGuid == ClrTraceEventParser.ProviderGuid)
+                {
+                    if (evt is GCStartTraceData gcStart)
+                    {
+                        var gcEvent = new GCEvent
+                        {
+                            Reason = gcStart.Reason.ToString(),
+                            Count = gcStart.Count,
+                            Depth = gcStart.Depth,
+                            GCType = gcStart.Type.ToString()
+                        };
+
+                        context.GcStartStopEvents.Push((evt.TimeStampRelativeMSec, gcEvent));
+                    }
+                    else if (evt is GCEndTraceData gcEnd && context.GcStartStopEvents.Count > 0)
+                    {
+                        var (gcEventStartTime, gcEvent) = context.GcStartStopEvents.Pop();
+
+                        markers.StartTime.Add(gcEventStartTime);
+                        markers.EndTime.Add(evt.TimeStampRelativeMSec);
+                        markers.Category.Add(CategoryGc);
+                        markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
+                        markers.ThreadId.Add(context.ProfileThreadIndex);
+                        markers.Name.Add(GetOrCreateString($"GC Event", context));
+                        markers.Data.Add(gcEvent);
+                        markers.Length++;
+                    }
+                    else if (evt is GCSuspendEETraceData gcSuspendEE)
+                    {
+                        var gcSuspendEEEvent = new GCSuspendExecutionEngineEvent
+                        {
+                            Reason = gcSuspendEE.Reason.ToString(),
+                            Count = gcSuspendEE.Count
+                        };
+
+                        context.GcSuspendEEEvents.Push((evt.TimeStampRelativeMSec, gcSuspendEEEvent));
+                    }
+                    else if (evt.ID == GCSuspendEEStopEventID && evt is GCNoUserDataTraceData &&
+                             context.GcSuspendEEEvents.Count > 0)
+                    {
+                        var (gcSuspendEEEventStartTime, gcSuspendEEEvent) = context.GcSuspendEEEvents.Pop();
+
+                        markers.StartTime.Add(gcSuspendEEEventStartTime);
+                        markers.EndTime.Add(evt.TimeStampRelativeMSec);
+                        markers.Category.Add(CategoryGc);
+                        markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
+                        markers.ThreadId.Add(context.ProfileThreadIndex);
+                        markers.Name.Add(GetOrCreateString($"GC Suspend EE", context));
+                        markers.Data.Add(gcSuspendEEEvent);
+                        markers.Length++;
+                    }
+                    else if (evt.ID == GCRestartEEStartEventID && evt is GCNoUserDataTraceData)
+                    {
+                        context.GcRestartEEEvents.Push(evt.TimeStampRelativeMSec);
+                    }
+                    else if (evt.ID == GCRestartEEStopEventID && evt is GCNoUserDataTraceData &&
+                             context.GcRestartEEEvents.Count > 0)
+                    {
+                        var gcRestartEEEventStartTime = context.GcRestartEEEvents.Pop();
+
+                        markers.StartTime.Add(gcRestartEEEventStartTime);
+                        markers.EndTime.Add(evt.TimeStampRelativeMSec);
+                        markers.Category.Add(CategoryGc);
+                        markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
+                        markers.ThreadId.Add(context.ProfileThreadIndex);
+                        markers.Name.Add(GetOrCreateString($"GC Restart EE", context));
+                        markers.Data.Add(null);
+                        markers.Length++;
+                    }
+                }
+            }
+
+            return;
+        }
+
+        // This guard used to be redundant with the per-thread `EventsInThread` filtering plus the
+        // `ReferenceEquals(evt.Thread(), thread)` check above it; both are now handled by routing
+        // through evt.Thread() before this method is even called. It is preserved here verbatim
+        // (guarding only the sampled-profile path, as it did before) out of caution, since it is
+        // not proven redundant for this specific event type.
+        if (evt.ProcessID != process.ProcessID || evt.ThreadID != thread.ThreadID)
+        {
+            return;
+        }
+
+        //Console.WriteLine($"PERF {evt}");
+
+        var callStackIndex = evt.CallStackIndex();
+        if (callStackIndex == CallStackIndex.Invalid)
+        {
+            return;
+        }
+
+        if (!ReferenceEquals(_traceLog.CallStacks.Thread(callStackIndex), thread))
+        {
+            return;
+        }
+
+        // Add sample
+        var firefoxCallStackIndex = ConvertCallStack(callStackIndex, context);
+
+        var deltaTime = evt.TimeStampRelativeMSec - context.StartTime;
+        // TimeDeltas/ThreadCPUDelta are nullable properties but SetupProcess always initializes
+        // them (in a different method, so nullable flow analysis can't see it) before phase 2 -
+        // the single event pass that calls ProcessEvent - runs.
+        samples.TimeDeltas!.Add(deltaTime);
+        samples.Stack.Add(firefoxCallStackIndex);
+        var cpuDeltaMs = (long) ((evt.TimeStampRelativeMSec - context.SwitchTimeInMsec) * 1_000_000.0);
+        if (cpuDeltaMs > 0)
+        {
+            samples.ThreadCPUDelta!.Add((int) cpuDeltaMs);
+        }
+        else
+        {
+            samples.ThreadCPUDelta!.Add(0);
+        }
+
+        context.SwitchTimeInMsec = evt.TimeStampRelativeMSec;
+        samples.Length++;
+        context.StartTime = evt.TimeStampRelativeMSec;
+    }
+
+    /// <summary>
+    /// Finalizes a process after the single event pass (phase 2) has completed for the whole
+    /// trace: computes each thread's final name, repairs incomplete stacks, builds the GC heap
+    /// stats memory counter, and marks the process's default visible/selected threads - in the
+    /// same per-process order as before.
+    /// </summary>
+    private void FinalizeProcess(ProcessConvertState state)
+    {
+        var process = state.Process;
+
+        foreach (var context in state.ThreadContexts)
+        {
+            var thread = context.Thread;
+            var profileThread = context.ProfileThread;
+
+            // _threadNames is guaranteed fully populated at this point (phase 2 has already
+            // scanned the entire trace for every process), so this reproduces exactly what used
+            // to be computed up-front per thread, before any of its events were processed.
+            string threadBaseName;
+            if (!_threadNames.TryGetValue(thread.ThreadID, out var dynamicThreadName))
+            {
+                threadBaseName = thread.ThreadInfo is not null
+                    ? $"{thread.ThreadInfo} ({thread.ThreadID})"
+                    : $"Thread ({thread.ThreadID})";
+            }
+            else
+            {
+                threadBaseName = $"{dynamicThreadName} ({thread.ThreadID})";
+            }
+            profileThread.Name = $"{context.ThreadIndex} - {threadBaseName}";
+
+            // This thread's events were already converted back in phase 2 (the single combined event
+            // pass over the whole trace, which reports its own progress - see ProgressLogEventInterval
+            // above). This message must not claim conversion is happening now: it precedes only the
+            // finalization work still left for this thread (name already computed above; stack repair
+            // and visibility/selection bookkeeping below).
+            Options.LogProgress?.Invoke($"Finalizing Thread: {profileThread.Name}");
+
+            RepairIsolatedIncompleteStacks(profileThread);
+
+            // profileThread is now fully built (nothing below touches this thread's interning
+            // dictionaries again), so release their backing storage now rather than letting every
+            // thread's maps stay alive through the JSON+gzip serialization that follows.
+            context.ReleaseInterningMaps();
+        }
+
+        // Default visible/selected threads were already computed by ThreadVisibilityPlanner in
+        // SetupProcess (see ProcessConvertState.InitialVisibleThreads/InitialSelectedThreads); commit
+        // them here, in the same per-process order as before.
+        ProfilerResult.Meta.InitialVisibleThreads!.AddRange(state.InitialVisibleThreads);
+        ProfilerResult.Meta.InitialSelectedThreads!.AddRange(state.InitialSelectedThreads);
+
+        // If we have GCHeapStatsEvents, we can create a Memory track
+        if (state.GcHeapStatsEvents.Count > 0)
+        {
+            var gcHeapStatsEvents = state.GcHeapStatsEvents;
             gcHeapStatsEvents.Sort((a, b) => a.Item1.CompareTo(b.Item1));
 
             var gcHeapStatsCounter = new FirefoxProfiler.Counter()
@@ -475,7 +780,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                 Description = "GC Heap Stats",
                 Color = FirefoxProfiler.ProfileColor.Orange, // Doesn't look like it is used
                 Pid = $"{process.ProcessID}",
-                MainThreadIndex = threadIndexWithMaxCpuTime,
+                MainThreadIndex = state.ThreadIndexWithMaxCpuTime,
             };
 
             //gcHeapStatsCounter.Samples.Number = new();
@@ -493,7 +798,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             gcHeapStatsCounter.Samples.Time!.Add(0);
             gcHeapStatsCounter.Samples.Count.Add(0);
             gcHeapStatsCounter.Samples.Length++;
-                
+
             foreach (var evt in gcHeapStatsEvents)
             {
                 gcHeapStatsCounter.Samples.Time!.Add(evt.Item1);
@@ -503,17 +808,6 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                 gcHeapStatsCounter.Samples.Length++;
                 previousTotalHeapSize = evt.Item2.TotalHeapSize;
             }
-        }
-
-        if (threads.Count > 0)
-        {
-            // Always make at least the first thread visible (that is taking most of the CPU time)
-            if (!ProfilerResult.Meta.InitialVisibleThreads!.Contains(threadIndexWithMaxCpuTime))
-            {
-                ProfilerResult.Meta.InitialVisibleThreads.Add(threadIndexWithMaxCpuTime);
-            }
-
-            ProfilerResult.Meta.InitialSelectedThreads!.Add(threadIndexWithMaxCpuTime);
         }
     }
 
@@ -877,15 +1171,35 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
     /// Loads the modules - and symbols for a given process.
     /// </summary>
     /// <param name="process">The process to load the modules.</param>
-    private void LoadModules(TraceProcess process)
+    /// <returns>The per-process module classification (managed-module set and clrjit/coreclr module indices) needed to categorize this process's frames later.</returns>
+    private ProcessModuleContext LoadModules(TraceProcess process)
     {
         Options.LogProgress?.Invoke($"Loading Modules for process {process.Name} ({process.ProcessID})");
 
-        _setManagedModules.Clear();
-        _clrJitModuleIndex = ModuleFileIndex.Invalid;
-        _coreClrModuleIndex = ModuleFileIndex.Invalid;
+        var managedModules = new HashSet<ModuleFileIndex>();
+        var clrJitModuleIndex = ModuleFileIndex.Invalid;
+        var coreClrModuleIndex = ModuleFileIndex.Invalid;
 
         var allModules = process.LoadedModules.ToList();
+
+        // Precompute the non-managed modules grouped by FilePath (OrdinalIgnoreCase, matching the
+        // comparison below) once per process, instead of re-scanning `allModules` with a LINQ
+        // `Where(x => x is not TraceManagedModule)` for every managed module - that was
+        // O(managedModules x allModules) for this process.
+        var nonManagedModulesByFilePath = new Dictionary<string, List<TraceLoadedModule>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var module in allModules)
+        {
+            if (module is not TraceManagedModule)
+            {
+                if (!nonManagedModulesByFilePath.TryGetValue(module.FilePath, out var bucket))
+                {
+                    bucket = new List<TraceLoadedModule>();
+                    nonManagedModulesByFilePath.Add(module.FilePath, bucket);
+                }
+                bucket.Add(module);
+            }
+        }
+
         for (var i = 0; i < allModules.Count; i++)
         {
             var module = allModules[i];
@@ -905,7 +1219,16 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                     Arch = "x64" // TODO
                 };
 
-                _traceLog!.CodeAddresses.LookupSymbolsForModule(_symbolReader, module.ModuleFile);
+                // TraceCodeAddresses.LookupSymbolsForModule scans the ENTIRE codeAddresses array
+                // (O(codeAddresses)) to collect the addresses that belong to this module, and
+                // returns early (`if (list.Count == 0) return;`) as soon as it finds none. When
+                // the module has zero code addresses attributed to it at all
+                // (CodeAddressesInModule == 0), that collected list is guaranteed to be empty, so
+                // the call would do nothing but pay for the full scan. Skip it in that case.
+                if (module.ModuleFile.CodeAddressesInModule != 0)
+                {
+                    _traceLog!.CodeAddresses.LookupSymbolsForModule(_symbolReader, module.ModuleFile);
+                }
 
                 _mapModuleFileIndexToFirefox.Add(module.ModuleFile.ModuleFileIndex, ProfilerResult.Libs.Count);
                 ProfilerResult.Libs.Add(lib);
@@ -914,42 +1237,44 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             var fileName = Path.GetFileName(module.FilePath);
             if (fileName.Equals("clrjit.dll", StringComparison.OrdinalIgnoreCase))
             {
-                _clrJitModuleIndex = module.ModuleFile.ModuleFileIndex;
+                clrJitModuleIndex = module.ModuleFile.ModuleFileIndex;
             }
             else if (fileName.Equals("coreclr.dll", StringComparison.OrdinalIgnoreCase))
             {
-                _coreClrModuleIndex = module.ModuleFile.ModuleFileIndex;
+                coreClrModuleIndex = module.ModuleFile.ModuleFileIndex;
             }
 
             if (module is TraceManagedModule managedModule)
             {
-                _setManagedModules.Add(managedModule.ModuleFile.ModuleFileIndex);
+                managedModules.Add(managedModule.ModuleFile.ModuleFileIndex);
 
-                foreach (var otherModule in allModules.Where(x => x is not TraceManagedModule))
+                if (nonManagedModulesByFilePath.TryGetValue(managedModule.FilePath, out var otherModules))
                 {
-                    if (string.Equals(managedModule.FilePath, otherModule.FilePath, StringComparison.OrdinalIgnoreCase))
+                    foreach (var otherModule in otherModules)
                     {
-                        _setManagedModules.Add(otherModule.ModuleFile.ModuleFileIndex);
+                        managedModules.Add(otherModule.ModuleFile.ModuleFileIndex);
                     }
                 }
             }
         }
+
+        return new ProcessModuleContext(managedModules, clrJitModuleIndex, coreClrModuleIndex);
     }
 
     /// <summary>
     /// Converts an ETW call stack to a Firefox call stack.
     /// </summary>
     /// <param name="callStackIndex">The ETW callstack index to convert.</param>
-    /// <param name="profileThread">The current Firefox thread.</param>
+    /// <param name="context">The current thread's conversion context.</param>
     /// <returns>The converted Firefox call stack index.</returns>
-    private int ConvertCallStack(CallStackIndex callStackIndex, FirefoxProfiler.Thread profileThread)
+    private int ConvertCallStack(CallStackIndex callStackIndex, ThreadConvertContext context)
     {
         if (callStackIndex == CallStackIndex.Invalid) return -1;
 
         var parentCallStackIndex = _traceLog.CallStacks.Caller(callStackIndex);
-        var fireFoxParentCallStackIndex = ConvertCallStack(parentCallStackIndex, profileThread);
+        var fireFoxParentCallStackIndex = ConvertCallStack(parentCallStackIndex, context);
 
-        return ConvertCallStack(callStackIndex, fireFoxParentCallStackIndex, profileThread);
+        return ConvertCallStack(callStackIndex, fireFoxParentCallStackIndex, context);
     }
 
     /// <summary>
@@ -957,21 +1282,21 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
     /// </summary>
     /// <param name="callStackIndex">The ETW callstack index to convert.</param>
     /// <param name="firefoxParentCallStackIndex">The parent Firefox callstack index.</param>
-    /// <param name="profileThread">The current Firefox thread.</param>
+    /// <param name="context">The current thread's conversion context.</param>
     /// <returns>The converted Firefox call stack index.</returns>
-    private int ConvertCallStack(CallStackIndex callStackIndex, int firefoxParentCallStackIndex, FirefoxProfiler.Thread profileThread)
+    private int ConvertCallStack(CallStackIndex callStackIndex, int firefoxParentCallStackIndex, ThreadConvertContext context)
     {
-        if (_mapCallStackIndexToFirefox.TryGetValue(callStackIndex, out var index))
+        if (context.MapCallStackIndexToFirefox.TryGetValue(callStackIndex, out var index))
         {
             return index;
         }
-        var stackTable = profileThread.StackTable;
+        var stackTable = context.ProfileThread.StackTable;
 
         var firefoxCallStackIndex = stackTable.Length;
-        _mapCallStackIndexToFirefox.Add(callStackIndex, firefoxCallStackIndex);
+        context.MapCallStackIndexToFirefox.Add(callStackIndex, firefoxCallStackIndex);
 
         var codeAddressIndex = _traceLog.CallStacks.CodeAddressIndex(callStackIndex);
-        var frameTableIndex = ConvertFrame(codeAddressIndex, profileThread, out var category, out var subCategory);
+        var frameTableIndex = ConvertFrame(codeAddressIndex, context, out var category, out var subCategory);
 
         stackTable.Frame.Add(frameTableIndex);
         stackTable.Category.Add(category);
@@ -986,15 +1311,16 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
     /// Converts an ETW code address to a Firefox frame.
     /// </summary>
     /// <param name="codeAddressIndex">The ETW code address index.</param>
-    /// <param name="profileThread">The current Firefox thread.</param>
+    /// <param name="context">The current thread's conversion context.</param>
     /// <param name="category">The category of the frame.</param>
     /// <param name="subCategory">The subcategory of the frame.</param>
     /// <returns></returns>
-    private int ConvertFrame(CodeAddressIndex codeAddressIndex, FirefoxProfiler.Thread profileThread, out int category, out int subCategory)
+    private int ConvertFrame(CodeAddressIndex codeAddressIndex, ThreadConvertContext context, out int category, out int subCategory)
     {
+        var profileThread = context.ProfileThread;
         var frameTable = profileThread.FrameTable;
 
-        if (_mapCodeAddressIndexToFirefox.TryGetValue(codeAddressIndex, out var firefoxFrameTableIndex))
+        if (context.MapCodeAddressIndexToFirefox.TryGetValue(codeAddressIndex, out var firefoxFrameTableIndex))
         {
             category = frameTable.Category[firefoxFrameTableIndex]!.Value;
             subCategory = frameTable.Subcategory[firefoxFrameTableIndex]!.Value;
@@ -1002,7 +1328,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         }
 
         firefoxFrameTableIndex = frameTable.Length;
-        _mapCodeAddressIndexToFirefox.Add(codeAddressIndex, firefoxFrameTableIndex);
+        context.MapCodeAddressIndexToFirefox.Add(codeAddressIndex, firefoxFrameTableIndex);
 
         var module = _traceLog.CodeAddresses.ModuleFile(codeAddressIndex);
         var absoluteAddress = _traceLog.CodeAddresses.Address(codeAddressIndex);
@@ -1025,7 +1351,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         bool isManaged = false;
         if (module is not null)
         {
-            isManaged = _setManagedModules.Contains(module.ModuleFileIndex);
+            isManaged = context.ProcessModules.ManagedModules.Contains(module.ModuleFileIndex);
         }
 
         subCategory = 0;
@@ -1041,11 +1367,11 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
 
             if (module != null)
             {
-                if (module.ModuleFileIndex == _clrJitModuleIndex)
+                if (module.ModuleFileIndex == context.ProcessModules.ClrJitModuleIndex)
                 {
                     category = CategoryJit;
                 }
-                else if (module.ModuleFileIndex == _coreClrModuleIndex)
+                else if (module.ModuleFileIndex == context.ProcessModules.CoreClrModuleIndex)
                 {
                     category = CategoryClr;
                 }
@@ -1053,7 +1379,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         }
 
         var methodIndex = _traceLog.CodeAddresses.MethodIndex(codeAddressIndex);
-        var firefoxMethodIndex = ConvertMethod(codeAddressIndex, methodIndex, profileThread);
+        var firefoxMethodIndex = ConvertMethod(codeAddressIndex, methodIndex, context);
 
         if (methodIndex != MethodIndex.Invalid)
         {
@@ -1099,31 +1425,32 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
     /// </summary>
     /// <param name="codeAddressIndex">The original code address.</param>
     /// <param name="methodIndex">The method index. Can be invalid.</param>
-    /// <param name="profileThread">The current Firefox thread.</param>
+    /// <param name="context">The current thread's conversion context.</param>
     /// <returns>The converted Firefox method index.</returns>
-    private int ConvertMethod(CodeAddressIndex codeAddressIndex, MethodIndex methodIndex, FirefoxProfiler.Thread profileThread)
+    private int ConvertMethod(CodeAddressIndex codeAddressIndex, MethodIndex methodIndex, ThreadConvertContext context)
     {
+        var profileThread = context.ProfileThread;
         var funcTable = profileThread.FuncTable;
         int firefoxMethodIndex;
         if (methodIndex == MethodIndex.Invalid)
         {
-            if (_mapCodeAddressIndexToMethodIndexFirefox.TryGetValue(codeAddressIndex, out var index))
+            if (context.MapCodeAddressIndexToMethodIndexFirefox.TryGetValue(codeAddressIndex, out var index))
             {
                 return index;
             }
             firefoxMethodIndex = funcTable.Length;
-            _mapCodeAddressIndexToMethodIndexFirefox[codeAddressIndex] = firefoxMethodIndex;
+            context.MapCodeAddressIndexToMethodIndexFirefox[codeAddressIndex] = firefoxMethodIndex;
         }
-        else if (_mapMethodIndexToFirefox.TryGetValue(methodIndex, out var index))
+        else if (context.MapMethodIndexToFirefox.TryGetValue(methodIndex, out var index))
         {
             return index;
         }
         else
         {
             firefoxMethodIndex = funcTable.Length;
-            _mapMethodIndexToFirefox.Add(methodIndex, firefoxMethodIndex);
+            context.MapMethodIndexToFirefox.Add(methodIndex, firefoxMethodIndex);
         }
-        
+
         //public List<int> Name { get; }
         //public List<bool> IsJS { get; }
         //public List<bool> RelevantForJS { get; }
@@ -1138,7 +1465,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             string? moduleName = module?.Name;
             var absoluteAddress = _traceLog.CodeAddresses.Address(codeAddressIndex);
 
-            funcTable.Name.Add(GetOrCreateString($"{moduleName}!0x{absoluteAddress:X16}", profileThread));
+            funcTable.Name.Add(GetOrCreateString($"{moduleName}!0x{absoluteAddress:X16}", context));
             funcTable.IsJS.Add(false);
             funcTable.RelevantForJS.Add(false);
             funcTable.Resource.Add(-1);
@@ -1150,7 +1477,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         {
             var fullMethodName = _traceLog.CodeAddresses.Methods.FullMethodName(methodIndex) ?? $"0x{_traceLog.CodeAddresses.Address(codeAddressIndex):X16}";
 
-            var firefoxMethodNameIndex = GetOrCreateString(fullMethodName, profileThread);
+            var firefoxMethodNameIndex = GetOrCreateString(fullMethodName, context);
             funcTable.Name.Add(firefoxMethodNameIndex);
             funcTable.IsJS.Add(false);
             funcTable.RelevantForJS.Add(false);
@@ -1164,7 +1491,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                 funcTable.Resource.Add(profileThread.ResourceTable.Length);
 
                 var moduleName = Path.GetFileName(_traceLog.ModuleFiles[moduleIndex].FilePath);
-                profileThread.ResourceTable.Name.Add(GetOrCreateString(moduleName, profileThread));
+                profileThread.ResourceTable.Name.Add(GetOrCreateString(moduleName, context));
                 profileThread.ResourceTable.Lib.Add(firefoxModuleIndex);
                 profileThread.ResourceTable.Length++;
             }
@@ -1178,21 +1505,22 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
 
         return firefoxMethodIndex;
     }
-    
+
     /// <summary>
-    /// Gets or creates a string for the specified Firefox profile thread.
+    /// Gets or creates a string for the specified thread's conversion context.
     /// </summary>
     /// <param name="text">The string to create.</param>
-    /// <param name="profileThread">The current Firefox thread to create the string in.</param>
+    /// <param name="context">The current thread's conversion context.</param>
     /// <returns>The index of the string in the Firefox profile thread.</returns>
-    private int GetOrCreateString(string text, FirefoxProfiler.Thread profileThread)
+    private int GetOrCreateString(string text, ThreadConvertContext context)
     {
-        if (_mapStringToFirefox.TryGetValue(text, out var index))
+        if (context.MapStringToFirefox.TryGetValue(text, out var index))
         {
             return index;
         }
+        var profileThread = context.ProfileThread;
         var firefoxStringIndex = profileThread.StringArray.Count;
-        _mapStringToFirefox.Add(text, firefoxStringIndex);
+        context.MapStringToFirefox.Add(text, firefoxStringIndex);
 
         profileThread.StringArray.Add(text);
         return firefoxStringIndex;
