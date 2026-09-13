@@ -25,6 +25,7 @@ public class UltraProfilerOptions
         DelayInSeconds = 0.0; // 0 seconds
         DurationInSeconds = 120.0; // 120 seconds
         MinimumCpuTimeBeforeThreadIsVisibleInMs = 10.0;
+        MaxDegreeOfParallelism = 0;
     }
 
     /// <summary>
@@ -141,6 +142,18 @@ public class UltraProfilerOptions
     /// Gets or sets the minimum CPU time before a thread is visible in milliseconds.
     /// </summary>
     public double MinimumCpuTimeBeforeThreadIsVisibleInMs { get; set; }
+
+    /// <summary>
+    /// Gets or sets the maximum degree of parallelism used when converting per-thread trace data to a
+    /// Firefox profile.
+    /// </summary>
+    /// <remarks>
+    /// Any value less than or equal to <c>0</c> - including the default, <c>0</c> - means the number of
+    /// processors reported by <see cref="Environment.ProcessorCount"/> is used instead. A value of <c>1</c>
+    /// forces fully sequential conversion, which is useful for debugging and for deterministic tests. Any
+    /// other positive value is used as-is as the maximum number of worker threads.
+    /// </remarks>
+    public int MaxDegreeOfParallelism { get; set; }
 
     /// <summary>
     /// Ensures that the directory for the base output file name exists.

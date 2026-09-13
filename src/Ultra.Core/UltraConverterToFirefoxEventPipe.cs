@@ -2,7 +2,9 @@
 // Licensed under the BSD-Clause 2 license.
 // See license.txt file in the project root for full license information.
 
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Microsoft.Diagnostics.Tracing;
 using Ultra.Core.MachO;
 using Ultra.Core.Markers;
@@ -18,23 +20,48 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
     private const string SamplerFileSuffix = "_sampler.nettrace";
     private const string ClrFileSuffix = "_clr.nettrace";
 
-    private readonly EventPipeEventSource _samplerSource;
+    private readonly EventPipeEventSource? _samplerSource;
     private readonly EventPipeEventSource? _clrSource;
 
-    private readonly Dictionary<UCallStackIndex, int> _mapCallStackIndexToFirefox = new();
-    private readonly Dictionary<UCodeAddressIndex, int> _mapCodeAddressIndexToFirefox = new();
-    private readonly Dictionary<UTraceManagedMethod, int> _mapManagedMethodToFirefox = new(ReferenceEqualityComparer.Instance);
-    private readonly Dictionary<UTraceModuleFile, int> _mapModuleFileToResourceFirefox = new(ReferenceEqualityComparer.Instance);
-    private readonly Dictionary<string, int> _mapStringToFirefox = new(StringComparer.Ordinal);
+    // Everything that used to be an instance field here (call-stack/code-address/managed-method/module-
+    // file/string/native-symbol interning maps, the GC-alloc-tick name index) is really per-output-thread
+    // state: ConvertProcess below converts each thread's samples/markers into a fully self-contained
+    // FirefoxProfiler.Thread (its own StringArray, FuncTable, FrameTable, StackTable, ResourceTable), with
+    // no interning shared across threads. That state now lives in ThreadConversionContext (see below), one
+    // instance per parallel worker, so threads can be converted concurrently without sharing any mutable
+    // lookup state.
+
+    /// <summary>
+    /// Maps a native module file index to its index in <see cref="UltraConverterToFirefox.ProfilerResult"/>'s
+    /// Libs table. Populated once per process in <see cref="LoadModules"/>, before the per-thread parallel
+    /// region in <see cref="ConvertProcess"/> starts, and only ever read (never written) afterwards, so it
+    /// is safe to read concurrently from multiple worker threads.
+    /// </summary>
     private readonly Dictionary<UTraceModuleFileIndex, int> _mapModuleFileIndexToFirefox = new();
-    private readonly Dictionary<UTraceModuleFile, MachOSymbolReader?> _mapModuleFileToSymbolReader = new(ReferenceEqualityComparer.Instance);
-    private readonly Dictionary<(UTraceModuleFileIndex, ulong), int> _mapNativeSymbolToFirefox = new();
+
+    /// <summary>
+    /// Caches the <see cref="MachOSymbolReader"/> for each module file. <see cref="MachOSymbolReader"/> is
+    /// immutable after construction (a readonly symbol array, resolved via a pure binary search), so a
+    /// <see cref="ConcurrentDictionary{TKey,TValue}"/> is sufficient to share this cache safely across the
+    /// worker threads converting different output threads in parallel. The <see cref="Lazy{T}"/> wrapper
+    /// ensures <see cref="MachOSymbolReader.TryRead(string, out MachOSymbolReader?)"/> (which does file I/O) runs at most once per module
+    /// file even though <see cref="ConcurrentDictionary{TKey,TValue}.GetOrAdd(TKey,Func{TKey,TValue})"/> can
+    /// invoke its factory more than once concurrently for the same key.
+    /// </summary>
+    private readonly ConcurrentDictionary<UTraceModuleFile, Lazy<MachOSymbolReader?>> _mapModuleFileToSymbolReader = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>
+    /// The set of mangled C++ names collected across all threads of all processes, later demangled in bulk
+    /// by <see cref="DemangleNativeSymbols"/>. Each parallel worker collects its own set in
+    /// <see cref="ThreadConversionContext.MangledNames"/>; <see cref="ConvertProcess"/> merges those into
+    /// this shared set (in deterministic thread-index order) only after its parallel region has completed,
+    /// so this field itself is never mutated concurrently.
+    /// </summary>
     private readonly HashSet<string> _mangledNames = new(StringComparer.Ordinal);
 
     private UTraceModuleFileIndex _clrJitModuleIndex = UTraceModuleFileIndex.Invalid;
     private UTraceModuleFileIndex _coreClrModuleIndex = UTraceModuleFileIndex.Invalid;
     private int _profileThreadIndex;
-    private int _gcAllocationTickNameIndex = -1;
 
     // Offset to apply to CLR relative timestamps to realign them with the sampler session start time
     private double _clrTimeOffsetInMs;
@@ -67,10 +94,22 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
         _clrSource = clrFilePath is not null ? new EventPipeEventSource(clrFilePath) : null;
     }
 
+    /// <summary>
+    /// Initializes a new instance for tests, bypassing the file-based EventPipe sources so a pre-built
+    /// <see cref="UTraceSession"/> can be converted directly via <see cref="ConvertSessionForTests"/>,
+    /// without opening any trace file.
+    /// </summary>
+    /// <param name="options">The options used for converting.</param>
+    internal UltraConverterToFirefoxEventPipe(UltraProfilerOptions options) : base(new List<UltraProfilerTraceFile>(), options)
+    {
+        _samplerSource = null;
+        _clrSource = null;
+    }
+
     /// <inheritdoc />
     public override void Dispose()
     {
-        _samplerSource.Dispose();
+        _samplerSource?.Dispose();
         _clrSource?.Dispose();
     }
 
@@ -78,18 +117,44 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
     {
         Options.LogProgress?.Invoke("Processing Trace Files");
 
+        // ConvertImpl is only reached through the file-based construction path (see the public
+        // constructor above), where _samplerSource is always set.
         var processor = _clrSource is not null
-            ? new UltraEventProcessor(_samplerSource, _clrSource)
-            : new UltraEventProcessor(_samplerSource);
+            ? new UltraEventProcessor(_samplerSource!, _clrSource)
+            : new UltraEventProcessor(_samplerSource!);
 
         var session = processor.Run();
 
         // The CLR session and the sampler session don't start at the same time. Sample timestamps are relative to
         // the sampler session start while CLR marker timestamps are relative to the CLR session start.
         _clrTimeOffsetInMs = _clrSource is not null
-            ? (_clrSource.SessionStartTime - _samplerSource.SessionStartTime).TotalMilliseconds
+            ? (_clrSource.SessionStartTime - _samplerSource!.SessionStartTime).TotalMilliseconds
             : 0.0;
 
+        ConvertSessionToProfile(session, processIds);
+    }
+
+    /// <summary>
+    /// Converts a pre-built trace session directly to a Firefox profile. This is the seam used by tests to
+    /// exercise the conversion logic deterministically, without opening any <see cref="EventPipeEventSource"/>.
+    /// </summary>
+    /// <param name="session">The trace session to convert.</param>
+    /// <param name="processIds">The list of process ids to extract from the session.</param>
+    /// <returns>The converted Firefox profile.</returns>
+    internal FirefoxProfiler.Profile ConvertSessionForTests(UTraceSession session, List<int> processIds)
+    {
+        ConvertSessionToProfile(session, processIds);
+        return ProfilerResult;
+    }
+
+    /// <summary>
+    /// Converts the given trace session to a Firefox profile for the specified process ids, populating
+    /// <see cref="UltraConverterToFirefox.ProfilerResult"/>.
+    /// </summary>
+    /// <param name="session">The trace session to convert.</param>
+    /// <param name="processIds">The list of process ids to extract from the session.</param>
+    private void ConvertSessionToProfile(UTraceSession session, List<int> processIds)
+    {
         ProfilerResult = CreateProfile(session);
 
         _profileThreadIndex = 0;
@@ -179,20 +244,36 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
         threads.Sort((a, b) => b.CpuTimeInMs.CompareTo(a.CpuTimeInMs));
 
         double maxCpuTime = threads.Count > 0 ? threads[0].CpuTimeInMs : 0;
-        int threadIndexWithMaxCpuTime = threads.Count > 0 ? _profileThreadIndex : -1;
+
+        // Base index at which this process' threads will land in ProfilerResult.Threads. Every thread is
+        // converted in parallel below, so any index derived from it (the thread's own profile-thread index,
+        // marker ThreadId's, etc.) must be precomputed from this base plus the thread's own position in
+        // `threads`, rather than read off the (otherwise concurrently mutated) _profileThreadIndex field.
+        var processThreadBaseIndex = _profileThreadIndex;
+        int threadIndexWithMaxCpuTime = threads.Count > 0 ? processThreadBaseIndex : -1;
 
         var processNameWithId = $"{processName} ({process.ProcessID})";
 
-        for (var threadIndex = 0; threadIndex < threads.Count; threadIndex++)
-        {
-            var (thread, cpuTimeInMs) = threads[threadIndex];
+        // TryFindNativeModuleByAddress performs a lazy sort of the module address ranges on first use. Force
+        // that sort now, once, from this single thread, so the parallel region below never races on it.
+        process.Modules.EnsureNativeModuleAddressRangesSorted();
 
-            _mapCallStackIndexToFirefox.Clear();
-            _mapCodeAddressIndexToFirefox.Clear();
-            _mapManagedMethodToFirefox.Clear();
-            _mapModuleFileToResourceFirefox.Clear();
-            _mapStringToFirefox.Clear();
-            _mapNativeSymbolToFirefox.Clear();
+        // Each thread builds a fully self-contained FirefoxProfiler.Thread (see ThreadConversionContext), so
+        // slots are preallocated here and filled by index from the parallel region, then appended - along
+        // with everything else below that the parallel region collects - in this deterministic (CPU-time
+        // descending) order, never in whatever order the workers happen to finish in.
+        var profileThreads = new FirefoxProfiler.Thread[threads.Count];
+        var gcHeapStatsMarkersByThread = new List<(double, GCHeapStatsTraceMarker)>?[threads.Count];
+        var mangledNamesByThread = new HashSet<string>?[threads.Count];
+
+        Options.LogProgress?.Invoke($"Converting Events for {threads.Count} Threads");
+
+        var maxDegreeOfParallelism = Options.MaxDegreeOfParallelism > 0 ? Options.MaxDegreeOfParallelism : Environment.ProcessorCount;
+        var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = maxDegreeOfParallelism };
+
+        Parallel.For(0, threads.Count, parallelOptions, threadIndex =>
+        {
+            var (thread, _) = threads[threadIndex];
 
             var threadBaseName = string.IsNullOrEmpty(thread.Name)
                 ? $"Thread ({thread.ThreadID})"
@@ -216,10 +297,9 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
                 ShowMarkersInTimeline = true
             };
 
-            Options.LogProgress?.Invoke($"Converting Events for Thread: {profileThread.Name}");
+            var context = new ThreadConversionContext(profileThread, processThreadBaseIndex + threadIndex);
 
             var samples = profileThread.Samples;
-            var markers = profileThread.Markers;
 
             samples.ThreadCPUDelta = new List<int?>();
             samples.TimeDeltas = new List<double>();
@@ -229,7 +309,7 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
             double previousSampleTimeInMs = 0;
             foreach (var sample in thread.Samples.Items)
             {
-                var firefoxCallStackIndex = ConvertCallStack(sample.CallStackIndex, process, profileThread);
+                var firefoxCallStackIndex = ConvertCallStack(sample.CallStackIndex, process, context);
                 if (firefoxCallStackIndex < 0)
                 {
                     continue;
@@ -245,28 +325,48 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
             }
 
             // Convert markers
-            _gcAllocationTickNameIndex = -1;
             foreach (var marker in thread.Markers.Items)
             {
-                ConvertMarker(marker, threadIndex, thread, profileThread, gcHeapStatsMarkers);
+                ConvertMarker(marker, threadIndex, thread, context);
             }
 
-            ProfilerResult.Threads.Add(profileThread);
+            profileThreads[threadIndex] = profileThread;
+            gcHeapStatsMarkersByThread[threadIndex] = context.GcHeapStatsMarkers.Count > 0 ? context.GcHeapStatsMarkers : null;
+            mangledNamesByThread[threadIndex] = context.MangledNames.Count > 0 ? context.MangledNames : null;
+        });
+
+        _profileThreadIndex = processThreadBaseIndex + threads.Count;
+
+        // Append/merge everything collected above in deterministic (thread-index) order.
+        for (var threadIndex = 0; threadIndex < threads.Count; threadIndex++)
+        {
+            ProfilerResult.Threads.Add(profileThreads[threadIndex]);
+
+            if (gcHeapStatsMarkersByThread[threadIndex] is { } threadGcHeapStatsMarkers)
+            {
+                gcHeapStatsMarkers.AddRange(threadGcHeapStatsMarkers);
+            }
+
+            if (mangledNamesByThread[threadIndex] is { } threadMangledNames)
+            {
+                _mangledNames.UnionWith(threadMangledNames);
+            }
+
+            var cpuTimeInMs = threads[threadIndex].CpuTimeInMs;
+            var profileThreadIndex = processThreadBaseIndex + threadIndex;
 
             // Make visible threads in the UI that consume a minimum amount of CPU time
             if (cpuTimeInMs > Options.MinimumCpuTimeBeforeThreadIsVisibleInMs)
             {
-                ProfilerResult.Meta.InitialVisibleThreads!.Add(_profileThreadIndex);
+                ProfilerResult.Meta.InitialVisibleThreads!.Add(profileThreadIndex);
             }
 
             // We will select by default the thread that has the maximum activity
             if (cpuTimeInMs > maxCpuTime)
             {
                 maxCpuTime = cpuTimeInMs;
-                threadIndexWithMaxCpuTime = _profileThreadIndex;
+                threadIndexWithMaxCpuTime = profileThreadIndex;
             }
-
-            _profileThreadIndex++;
         }
 
         // If we have GCHeapStats markers, we can create a Memory track
@@ -396,25 +496,25 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
     /// </summary>
     /// <param name="callStackIndex">The model callstack index to convert.</param>
     /// <param name="process">The process owning the callstack.</param>
-    /// <param name="profileThread">The current Firefox thread.</param>
+    /// <param name="context">The conversion state for the current output thread.</param>
     /// <returns>The converted Firefox call stack index.</returns>
-    private int ConvertCallStack(UCallStackIndex callStackIndex, UTraceProcess process, FirefoxProfiler.Thread profileThread)
+    private int ConvertCallStack(UCallStackIndex callStackIndex, UTraceProcess process, ThreadConversionContext context)
     {
         // Index 0 is the reserved root callstack (invalid code address)
         if (callStackIndex.Value <= 0) return -1;
 
-        if (_mapCallStackIndexToFirefox.TryGetValue(callStackIndex, out var index))
+        if (context.MapCallStackIndexToFirefox.TryGetValue(callStackIndex, out var index))
         {
             return index;
         }
 
         var frame = process.CallStacks[callStackIndex];
-        var firefoxParentCallStackIndex = ConvertCallStack(frame.ParentCallStackIndex, process, profileThread);
+        var firefoxParentCallStackIndex = ConvertCallStack(frame.ParentCallStackIndex, process, context);
 
-        var stackTable = profileThread.StackTable;
+        var stackTable = context.ProfileThread.StackTable;
         var firefoxCallStackIndex = stackTable.Length;
 
-        var frameTableIndex = ConvertFrame(frame.CodeAddressIndex, process, profileThread, out var category, out var subCategory);
+        var frameTableIndex = ConvertFrame(frame.CodeAddressIndex, process, context, out var category, out var subCategory);
 
         stackTable.Frame.Add(frameTableIndex);
         stackTable.Category.Add(category);
@@ -422,7 +522,7 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
         stackTable.Prefix.Add(firefoxParentCallStackIndex < 0 ? null : firefoxParentCallStackIndex);
         stackTable.Length++;
 
-        _mapCallStackIndexToFirefox.Add(callStackIndex, firefoxCallStackIndex);
+        context.MapCallStackIndexToFirefox.Add(callStackIndex, firefoxCallStackIndex);
 
         return firefoxCallStackIndex;
     }
@@ -432,15 +532,15 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
     /// </summary>
     /// <param name="codeAddressIndex">The model code address index.</param>
     /// <param name="process">The process owning the code address.</param>
-    /// <param name="profileThread">The current Firefox thread.</param>
+    /// <param name="context">The conversion state for the current output thread.</param>
     /// <param name="category">The category of the frame.</param>
     /// <param name="subCategory">The subcategory of the frame.</param>
     /// <returns>The converted Firefox frame index.</returns>
-    private int ConvertFrame(UCodeAddressIndex codeAddressIndex, UTraceProcess process, FirefoxProfiler.Thread profileThread, out int category, out int subCategory)
+    private int ConvertFrame(UCodeAddressIndex codeAddressIndex, UTraceProcess process, ThreadConversionContext context, out int category, out int subCategory)
     {
-        var frameTable = profileThread.FrameTable;
+        var frameTable = context.ProfileThread.FrameTable;
 
-        if (_mapCodeAddressIndexToFirefox.TryGetValue(codeAddressIndex, out var firefoxFrameTableIndex))
+        if (context.MapCodeAddressIndexToFirefox.TryGetValue(codeAddressIndex, out var firefoxFrameTableIndex))
         {
             category = frameTable.Category[firefoxFrameTableIndex]!.Value;
             subCategory = frameTable.Subcategory[firefoxFrameTableIndex]!.Value;
@@ -448,7 +548,7 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
         }
 
         firefoxFrameTableIndex = frameTable.Length;
-        _mapCodeAddressIndexToFirefox.Add(codeAddressIndex, firefoxFrameTableIndex);
+        context.MapCodeAddressIndexToFirefox.Add(codeAddressIndex, firefoxFrameTableIndex);
 
         var address = process.CodeAddresses[codeAddressIndex];
 
@@ -462,7 +562,7 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
         if (managedMethodIndex >= 0)
         {
             category = CategoryManaged;
-            firefoxFuncIndex = ConvertManagedMethod(process.ManagedMethods[managedMethodIndex], process, profileThread);
+            firefoxFuncIndex = ConvertManagedMethod(process.ManagedMethods[managedMethodIndex], process, context);
         }
         else if (process.Modules.TryFindNativeModuleByAddress(address, out var nativeModule))
         {
@@ -478,14 +578,14 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
             }
 
             frameAddress = (int)(address - nativeModule.BaseAddress).Value;
-            firefoxFuncIndex = ConvertNativeAddress(address, nativeModule, profileThread, ref category);
+            firefoxFuncIndex = ConvertNativeAddress(address, nativeModule, context, ref category);
         }
         else
         {
             // Code addresses not belonging to a native module nor to a JIT-ed managed method
             // (e.g. JIT stubs, code produced before the CLR rundown)
             category = CategoryOther;
-            firefoxFuncIndex = ConvertUnknownAddress(address, profileThread);
+            firefoxFuncIndex = ConvertUnknownAddress(address, context);
         }
 
         frameTable.Address.Add(frameAddress);
@@ -506,18 +606,18 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
     /// <summary>
     /// Converts a managed method to a Firefox func.
     /// </summary>
-    private int ConvertManagedMethod(UTraceManagedMethod managedMethod, UTraceProcess process, FirefoxProfiler.Thread profileThread)
+    private int ConvertManagedMethod(UTraceManagedMethod managedMethod, UTraceProcess process, ThreadConversionContext context)
     {
-        if (_mapManagedMethodToFirefox.TryGetValue(managedMethod, out var index))
+        if (context.MapManagedMethodToFirefox.TryGetValue(managedMethod, out var index))
         {
             return index;
         }
 
-        var funcTable = profileThread.FuncTable;
+        var funcTable = context.ProfileThread.FuncTable;
         var firefoxFuncIndex = funcTable.Length;
-        _mapManagedMethodToFirefox.Add(managedMethod, firefoxFuncIndex);
+        context.MapManagedMethodToFirefox.Add(managedMethod, firefoxFuncIndex);
 
-        funcTable.Name.Add(GetOrCreateString(managedMethod.FullName, profileThread));
+        funcTable.Name.Add(GetOrCreateString(managedMethod.FullName, context));
         funcTable.IsJS.Add(false);
         funcTable.RelevantForJS.Add(false);
         funcTable.FileName.Add(null);
@@ -526,7 +626,7 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
 
         if (process.Modules.TryGetManagedModule(managedMethod.ModuleID, out var managedModule))
         {
-            funcTable.Resource.Add(GetOrCreateResource(managedModule.ModuleFile, profileThread));
+            funcTable.Resource.Add(GetOrCreateResource(managedModule.ModuleFile, context));
         }
         else
         {
@@ -541,15 +641,19 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
     /// <summary>
     /// Converts a native address to a Firefox func, using the symbols of the module when available.
     /// </summary>
-    private int ConvertNativeAddress(UAddress address, UTraceNativeModule nativeModule, FirefoxProfiler.Thread profileThread, ref int category)
+    private int ConvertNativeAddress(UAddress address, UTraceNativeModule nativeModule, ThreadConversionContext context, ref int category)
     {
         var moduleFile = nativeModule.ModuleFile;
 
-        if (!_mapModuleFileToSymbolReader.TryGetValue(moduleFile, out var symbolReader))
+        // See _mapModuleFileToSymbolReader: the Lazy<> wrapper guarantees MachOSymbolReader.TryRead (file
+        // I/O) runs at most once per module file, even though this can be called concurrently for the same
+        // moduleFile from several worker threads (native modules are shared across a process' threads).
+        var symbolReaderLazy = _mapModuleFileToSymbolReader.GetOrAdd(moduleFile, static mf => new Lazy<MachOSymbolReader?>(() =>
         {
-            MachOSymbolReader.TryRead(moduleFile.FilePath, out symbolReader);
-            _mapModuleFileToSymbolReader.Add(moduleFile, symbolReader);
-        }
+            MachOSymbolReader.TryRead(mf.FilePath, out var reader);
+            return reader;
+        }, LazyThreadSafetyMode.ExecutionAndPublication));
+        var symbolReader = symbolReaderLazy.Value;
 
         string funcName;
         if (symbolReader is not null && symbolReader.TryResolve(nativeModule.BaseAddress, address, out var symbol))
@@ -567,15 +671,15 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
 
             if (CppDemangler.IsMangled(funcName))
             {
-                _mangledNames.Add(funcName);
+                context.MangledNames.Add(funcName);
             }
 
             // Dedupe funcs per symbol so that samples in the same function aggregate in the call tree
-            if (_mapNativeSymbolToFirefox.TryGetValue((moduleFile.Index, symbol.Address), out var index))
+            if (context.MapNativeSymbolToFirefox.TryGetValue((moduleFile.Index, symbol.Address), out var index))
             {
                 return index;
             }
-            _mapNativeSymbolToFirefox.Add((moduleFile.Index, symbol.Address), profileThread.FuncTable.Length);
+            context.MapNativeSymbolToFirefox.Add((moduleFile.Index, symbol.Address), context.ProfileThread.FuncTable.Length);
         }
         else
         {
@@ -583,13 +687,13 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
             funcName = $"{moduleName}!0x{address.Value:X16}";
         }
 
-        var funcTable = profileThread.FuncTable;
+        var funcTable = context.ProfileThread.FuncTable;
         var firefoxFuncIndex = funcTable.Length;
 
-        funcTable.Name.Add(GetOrCreateString(funcName, profileThread));
+        funcTable.Name.Add(GetOrCreateString(funcName, context));
         funcTable.IsJS.Add(false);
         funcTable.RelevantForJS.Add(false);
-        funcTable.Resource.Add(GetOrCreateResource(moduleFile, profileThread));
+        funcTable.Resource.Add(GetOrCreateResource(moduleFile, context));
         funcTable.FileName.Add(null);
         funcTable.LineNumber.Add(null);
         funcTable.ColumnNumber.Add(null);
@@ -601,12 +705,12 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
     /// <summary>
     /// Converts an address not belonging to any known module or managed method to a Firefox func.
     /// </summary>
-    private int ConvertUnknownAddress(UAddress address, FirefoxProfiler.Thread profileThread)
+    private int ConvertUnknownAddress(UAddress address, ThreadConversionContext context)
     {
-        var funcTable = profileThread.FuncTable;
+        var funcTable = context.ProfileThread.FuncTable;
         var firefoxFuncIndex = funcTable.Length;
 
-        funcTable.Name.Add(GetOrCreateString($"0x{address.Value:X16}", profileThread));
+        funcTable.Name.Add(GetOrCreateString($"0x{address.Value:X16}", context));
         funcTable.IsJS.Add(false);
         funcTable.RelevantForJS.Add(false);
         funcTable.Resource.Add(-1);
@@ -621,19 +725,19 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
     /// <summary>
     /// Gets or creates a Firefox resource for the specified module file.
     /// </summary>
-    private int GetOrCreateResource(UTraceModuleFile moduleFile, FirefoxProfiler.Thread profileThread)
+    private int GetOrCreateResource(UTraceModuleFile moduleFile, ThreadConversionContext context)
     {
-        if (_mapModuleFileToResourceFirefox.TryGetValue(moduleFile, out var index))
+        if (context.MapModuleFileToResourceFirefox.TryGetValue(moduleFile, out var index))
         {
             return index;
         }
 
-        var resourceTable = profileThread.ResourceTable;
+        var resourceTable = context.ProfileThread.ResourceTable;
         var resourceIndex = resourceTable.Length;
-        _mapModuleFileToResourceFirefox.Add(moduleFile, resourceIndex);
+        context.MapModuleFileToResourceFirefox.Add(moduleFile, resourceIndex);
 
         var moduleName = moduleFile.FileName;
-        resourceTable.Name.Add(GetOrCreateString(moduleName, profileThread));
+        resourceTable.Name.Add(GetOrCreateString(moduleName, context));
         resourceTable.Lib.Add(_mapModuleFileIndexToFirefox.TryGetValue(moduleFile.Index, out var firefoxLibIndex) ? firefoxLibIndex : null);
         resourceTable.Host.Add(null);
         resourceTable.Type.Add(1); // 1 = library https://github.com/firefox-devtools/profiler/blob/main/src/types/profile.js (resourceTypes)
@@ -645,9 +749,9 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
     /// <summary>
     /// Converts a model marker to a Firefox marker.
     /// </summary>
-    private void ConvertMarker(UTraceMarker marker, int threadIndex, UTraceThread thread, FirefoxProfiler.Thread profileThread, List<(double, GCHeapStatsTraceMarker)> gcHeapStatsMarkers)
+    private void ConvertMarker(UTraceMarker marker, int threadIndex, UTraceThread thread, ThreadConversionContext context)
     {
-        var markers = profileThread.Markers;
+        var markers = context.ProfileThread.Markers;
 
         var startTimeInMs = marker.StartTime.InMs + _clrTimeOffsetInMs;
         var endTimeInMs = startTimeInMs + marker.Duration.InMs;
@@ -659,8 +763,8 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
                 markers.EndTime.Add(endTimeInMs);
                 markers.Category.Add(CategoryJit);
                 markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
-                markers.ThreadId.Add(_profileThreadIndex);
-                markers.Name.Add(GetOrCreateString("JitCompile", profileThread));
+                markers.ThreadId.Add(context.ProfileThreadIndex);
+                markers.Name.Add(GetOrCreateString("JitCompile", context));
                 markers.Data.Add(new JitCompileEvent
                 {
                     FullName = jitCompile.FullName,
@@ -674,8 +778,8 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
                 markers.EndTime.Add(endTimeInMs);
                 markers.Category.Add(CategoryGc);
                 markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
-                markers.ThreadId.Add(_profileThreadIndex);
-                markers.Name.Add(GetOrCreateString("GC Event", profileThread));
+                markers.ThreadId.Add(context.ProfileThreadIndex);
+                markers.Name.Add(GetOrCreateString("GC Event", context));
                 markers.Data.Add(new GCEvent
                 {
                     Reason = gc.Reason ?? string.Empty,
@@ -691,8 +795,8 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
                 markers.EndTime.Add(endTimeInMs);
                 markers.Category.Add(CategoryGc);
                 markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
-                markers.ThreadId.Add(_profileThreadIndex);
-                markers.Name.Add(GetOrCreateString("GC Suspend EE", profileThread));
+                markers.ThreadId.Add(context.ProfileThreadIndex);
+                markers.Name.Add(GetOrCreateString("GC Suspend EE", context));
                 markers.Data.Add(new GCSuspendExecutionEngineEvent
                 {
                     Reason = gcSuspendEE.Reason ?? string.Empty,
@@ -706,8 +810,8 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
                 markers.EndTime.Add(endTimeInMs);
                 markers.Category.Add(CategoryGc);
                 markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
-                markers.ThreadId.Add(_profileThreadIndex);
-                markers.Name.Add(GetOrCreateString("GC Restart EE", profileThread));
+                markers.ThreadId.Add(context.ProfileThreadIndex);
+                markers.Name.Add(GetOrCreateString("GC Restart EE", context));
                 markers.Data.Add(null);
                 markers.Length++;
                 break;
@@ -717,12 +821,12 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
                 markers.EndTime.Add(startTimeInMs);
                 markers.Category.Add(CategoryGc);
                 markers.Phase.Add(FirefoxProfiler.MarkerPhase.Instance);
-                markers.ThreadId.Add(_profileThreadIndex);
-                if (_gcAllocationTickNameIndex < 0)
+                markers.ThreadId.Add(context.ProfileThreadIndex);
+                if (context.GcAllocationTickNameIndex < 0)
                 {
-                    _gcAllocationTickNameIndex = GetOrCreateString($"{threadIndex} - GC Alloc ({thread.ThreadID})", profileThread);
+                    context.GcAllocationTickNameIndex = GetOrCreateString($"{threadIndex} - GC Alloc ({thread.ThreadID})", context);
                 }
-                markers.Name.Add(_gcAllocationTickNameIndex);
+                markers.Name.Add(context.GcAllocationTickNameIndex);
                 markers.Data.Add(new GCAllocationTickEvent
                 {
                     AllocationAmount = allocationTick.AllocationAmount,
@@ -738,8 +842,8 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
                 markers.EndTime.Add(startTimeInMs);
                 markers.Category.Add(CategoryGc);
                 markers.Phase.Add(FirefoxProfiler.MarkerPhase.Instance);
-                markers.ThreadId.Add(_profileThreadIndex);
-                markers.Name.Add(GetOrCreateString("GCHeapStats", profileThread));
+                markers.ThreadId.Add(context.ProfileThreadIndex);
+                markers.Name.Add(GetOrCreateString("GCHeapStats", context));
                 var heapStatEvent = new GCHeapStatsEvent
                 {
                     TotalHeapSize = gcHeapStats.TotalHeapSize,
@@ -763,7 +867,7 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
                 markers.Data.Add(heapStatEvent);
                 markers.Length++;
 
-                gcHeapStatsMarkers.Add((startTimeInMs, gcHeapStats));
+                context.GcHeapStatsMarkers.Add((startTimeInMs, gcHeapStats));
                 break;
         }
     }
@@ -772,18 +876,18 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
     /// Gets or creates a string for the specified Firefox profile thread.
     /// </summary>
     /// <param name="text">The string to create.</param>
-    /// <param name="profileThread">The current Firefox thread to create the string in.</param>
+    /// <param name="context">The conversion state for the current output thread.</param>
     /// <returns>The index of the string in the Firefox profile thread.</returns>
-    private int GetOrCreateString(string text, FirefoxProfiler.Thread profileThread)
+    private int GetOrCreateString(string text, ThreadConversionContext context)
     {
-        if (_mapStringToFirefox.TryGetValue(text, out var index))
+        if (context.MapStringToFirefox.TryGetValue(text, out var index))
         {
             return index;
         }
-        var firefoxStringIndex = profileThread.StringArray.Count;
-        _mapStringToFirefox.Add(text, firefoxStringIndex);
+        var firefoxStringIndex = context.ProfileThread.StringArray.Count;
+        context.MapStringToFirefox.Add(text, firefoxStringIndex);
 
-        profileThread.StringArray.Add(text);
+        context.ProfileThread.StringArray.Add(text);
         return firefoxStringIndex;
     }
 
@@ -902,5 +1006,89 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
         };
 
         return profile;
+    }
+
+    /// <summary>
+    /// Holds the per-output-thread mutable state used while converting one <see cref="UTraceThread"/> into a
+    /// <see cref="FirefoxProfiler.Thread"/>. <see cref="ConvertProcess"/> creates one instance per parallel
+    /// worker (one per output thread), so distinct output threads never share any interning/lookup state and
+    /// can be converted concurrently and independently of each other.
+    /// </summary>
+    private sealed class ThreadConversionContext
+    {
+        /// <summary>
+        /// Initializes a new instance of the <see cref="ThreadConversionContext"/> class.
+        /// </summary>
+        /// <param name="profileThread">The Firefox profile thread being built.</param>
+        /// <param name="profileThreadIndex">
+        /// The index at which <paramref name="profileThread"/> will land in <see cref="FirefoxProfiler.Profile.Threads"/>,
+        /// precomputed from the process' base thread index before the parallel region starts so it never
+        /// depends on completion order.
+        /// </param>
+        public ThreadConversionContext(FirefoxProfiler.Thread profileThread, int profileThreadIndex)
+        {
+            ProfileThread = profileThread;
+            ProfileThreadIndex = profileThreadIndex;
+        }
+
+        /// <summary>
+        /// Gets the Firefox profile thread being built.
+        /// </summary>
+        public FirefoxProfiler.Thread ProfileThread { get; }
+
+        /// <summary>
+        /// Gets the index at which <see cref="ProfileThread"/> will land in <see cref="FirefoxProfiler.Profile.Threads"/>.
+        /// </summary>
+        public int ProfileThreadIndex { get; }
+
+        /// <summary>
+        /// Maps a model call stack index to the index of the corresponding entry in <see cref="ProfileThread"/>'s stack table.
+        /// </summary>
+        public Dictionary<UCallStackIndex, int> MapCallStackIndexToFirefox { get; } = new();
+
+        /// <summary>
+        /// Maps a model code address index to the index of the corresponding entry in <see cref="ProfileThread"/>'s frame table.
+        /// </summary>
+        public Dictionary<UCodeAddressIndex, int> MapCodeAddressIndexToFirefox { get; } = new();
+
+        /// <summary>
+        /// Maps a managed method to the index of the corresponding entry in <see cref="ProfileThread"/>'s func table.
+        /// </summary>
+        public Dictionary<UTraceManagedMethod, int> MapManagedMethodToFirefox { get; } = new(ReferenceEqualityComparer.Instance);
+
+        /// <summary>
+        /// Maps a module file to the index of the corresponding entry in <see cref="ProfileThread"/>'s resource table.
+        /// </summary>
+        public Dictionary<UTraceModuleFile, int> MapModuleFileToResourceFirefox { get; } = new(ReferenceEqualityComparer.Instance);
+
+        /// <summary>
+        /// Maps a string to its index in <see cref="ProfileThread"/>'s string array.
+        /// </summary>
+        public Dictionary<string, int> MapStringToFirefox { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Maps a resolved native symbol (module file index, symbol address) to the index of the
+        /// corresponding entry in <see cref="ProfileThread"/>'s func table, so that samples in the same
+        /// native function aggregate in the call tree.
+        /// </summary>
+        public Dictionary<(UTraceModuleFileIndex, ulong), int> MapNativeSymbolToFirefox { get; } = new();
+
+        /// <summary>
+        /// Gets the GCHeapStats markers collected for this thread. <see cref="ConvertProcess"/> merges these
+        /// (in deterministic thread-index order) into the process-wide list used to build the memory counter.
+        /// </summary>
+        public List<(double TimeInMs, GCHeapStatsTraceMarker Marker)> GcHeapStatsMarkers { get; } = new();
+
+        /// <summary>
+        /// Gets the mangled C++ names collected for this thread. <see cref="ConvertProcess"/> merges these
+        /// (in deterministic thread-index order) into the process-wide set demangled in <see cref="DemangleNativeSymbols"/>.
+        /// </summary>
+        public HashSet<string> MangledNames { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Gets or sets the string index of this thread's "GC Alloc" marker name, computed lazily the first
+        /// time a <see cref="GCAllocationTickTraceMarker"/> is converted for this thread.
+        /// </summary>
+        public int GcAllocationTickNameIndex { get; set; } = -1;
     }
 }

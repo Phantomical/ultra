@@ -1,0 +1,1055 @@
+﻿{
+  "meta": {
+    "interval": 1,
+    "startTime": 1704067200000,
+    "endTime": 1704067201000,
+    "profilingStartTime": 0,
+    "profilingEndTime": 1000,
+    "processType": 0,
+    "categories": [
+      {
+        "name": "Other",
+        "color": "grey",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "name": "Kernel",
+        "color": "orange",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "name": "Native",
+        "color": "blue",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "name": ".NET",
+        "color": "green",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "name": ".NET GC",
+        "color": "yellow",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "name": ".NET JIT",
+        "color": "purple",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "name": ".NET CLR",
+        "color": "grey",
+        "subcategories": [
+          "Other"
+        ]
+      }
+    ],
+    "product": "myapp.exe",
+    "stackwalk": 1,
+    "version": 29,
+    "preprocessedProfileVersion": 51,
+    "abi": "test-abi",
+    "oscpu": "macOS 14.5 (Test Fixture)",
+    "platform": "macOS 14.5 (Test Fixture)",
+    "logicalCPUs": 8,
+    "symbolicated": true,
+    "markerSchema": [
+      {
+        "name": "CC",
+        "tableLabel": "JIT Compile: {marker.data.fullName}, ILSize: {marker.data.methodILSize}",
+        "chartLabel": "JIT Compile: {marker.data.fullName}, ILSize: {marker.data.methodILSize}",
+        "display": [
+          "timeline-overview",
+          "marker-chart",
+          "marker-table"
+        ],
+        "data": [
+          {
+            "key": "fullName",
+            "label": "Full Name",
+            "format": "string"
+          },
+          {
+            "key": "methodILSize",
+            "label": "Method IL Size",
+            "format": "integer"
+          }
+        ]
+      },
+      {
+        "name": "GCMajor",
+        "tableLabel": "GC: {marker.data.reason}, Type: {marker.data.gcType}, Count: {marker.data.count}",
+        "chartLabel": "GC: {marker.data.reason}, Type: {marker.data.gcType}, Count: {marker.data.count}",
+        "display": [
+          "timeline-memory",
+          "marker-chart",
+          "marker-table"
+        ],
+        "data": [
+          {
+            "key": "reason",
+            "label": "Reason",
+            "format": "string"
+          },
+          {
+            "key": "count",
+            "label": "Count",
+            "format": "integer"
+          },
+          {
+            "key": "depth",
+            "label": "Depth",
+            "format": "integer"
+          },
+          {
+            "key": "gcType",
+            "label": "GC Type",
+            "format": "string"
+          }
+        ]
+      },
+      {
+        "name": "dotnet.gc.heap_stats",
+        "tableLabel": "GC Heap Stats: {marker.data.totalHeapSize}, Promoted: {marker.data.totalPromoted}",
+        "chartLabel": "GC Heap Stats: {marker.data.totalHeapSize}, Promoted: {marker.data.totalPromoted}",
+        "display": [
+          "marker-chart",
+          "marker-table",
+          "timeline-memory"
+        ],
+        "data": [
+          {
+            "key": "totalHeapSize",
+            "label": "Total Heap Size",
+            "format": "bytes"
+          },
+          {
+            "key": "totalPromoted",
+            "label": "Total Promoted",
+            "format": "bytes"
+          },
+          {
+            "key": "generationSize0",
+            "label": "Generation Size 0",
+            "format": "bytes"
+          },
+          {
+            "key": "totalPromotedSize0",
+            "label": "Total Promoted Size 0",
+            "format": "bytes"
+          },
+          {
+            "key": "generationSize1",
+            "label": "Generation Size 1",
+            "format": "bytes"
+          },
+          {
+            "key": "totalPromotedSize1",
+            "label": "Total Promoted Size 1",
+            "format": "bytes"
+          },
+          {
+            "key": "generationSize2",
+            "label": "Generation Size 2",
+            "format": "bytes"
+          },
+          {
+            "key": "totalPromotedSize2",
+            "label": "Total Promoted Size 2",
+            "format": "bytes"
+          },
+          {
+            "key": "generationSize3",
+            "label": "Generation Size 3",
+            "format": "bytes"
+          },
+          {
+            "key": "totalPromotedSize3",
+            "label": "Total Promoted Size 3",
+            "format": "bytes"
+          },
+          {
+            "key": "generationSize4",
+            "label": "Generation Size 4",
+            "format": "bytes"
+          },
+          {
+            "key": "totalPromotedSize4",
+            "label": "Total Promoted Size 4",
+            "format": "bytes"
+          },
+          {
+            "key": "finalizationPromotedSize",
+            "label": "Finalization Promoted Size",
+            "format": "bytes"
+          },
+          {
+            "key": "finalizationPromotedCount",
+            "label": "Finalization Promoted Count",
+            "format": "integer"
+          },
+          {
+            "key": "pinnedObjectCount",
+            "label": "Pinned Object Count",
+            "format": "integer"
+          },
+          {
+            "key": "sinkBlockCount",
+            "label": "Sink Block Count",
+            "format": "integer"
+          },
+          {
+            "key": "gcHandleCount",
+            "label": "GCHandle Count",
+            "format": "integer"
+          }
+        ]
+      },
+      {
+        "name": "GCMinor",
+        "tableLabel": "GC Allocation: {marker.data.typeName}, Amount: {marker.data.allocationAmount}",
+        "chartLabel": "GC Allocation: {marker.data.typeName}, Amount: {marker.data.allocationAmount}",
+        "display": [
+          "timeline-overview",
+          "marker-chart",
+          "marker-table"
+        ],
+        "data": [
+          {
+            "key": "allocationAmount",
+            "label": "Allocation Amount",
+            "format": "bytes"
+          },
+          {
+            "key": "allocationKind",
+            "label": "Allocation Kind",
+            "format": "string"
+          },
+          {
+            "key": "typeName",
+            "label": "Type Name",
+            "format": "string"
+          },
+          {
+            "key": "heapIndex",
+            "label": "Heap Index",
+            "format": "integer"
+          }
+        ],
+        "graphs": [
+          {
+            "key": "allocationAmount",
+            "type": "bar",
+            "color": "red"
+          }
+        ]
+      },
+      {
+        "name": "dotnet.gc.suspend_execution_engine",
+        "tableLabel": "GC Suspend Execution Engine: {marker.data.reason}, Count: {marker.data.count}",
+        "chartLabel": "GC Suspend Execution Engine: {marker.data.reason}, Count: {marker.data.count}",
+        "display": [
+          "timeline-overview",
+          "marker-chart",
+          "marker-table"
+        ],
+        "data": [
+          {
+            "key": "reason",
+            "label": "Reason",
+            "format": "string"
+          },
+          {
+            "key": "count",
+            "label": "Count",
+            "format": "integer"
+          }
+        ]
+      },
+      {
+        "name": "dotnet.gc.restart_execution_engine",
+        "tableLabel": "GC Restart Execution Engine",
+        "chartLabel": "GC Restart Execution Engine",
+        "display": [
+          "timeline-overview",
+          "marker-chart",
+          "marker-table"
+        ],
+        "data": []
+      }
+    ],
+    "sampleUnits": {
+      "time": "ms",
+      "eventDelay": "ms",
+      "threadCPUDelta": "ns"
+    },
+    "doesNotUseFrameImplementation": true,
+    "initialVisibleThreads": [
+      0,
+      1
+    ],
+    "initialSelectedThreads": [
+      0
+    ]
+  },
+  "libs": [
+    {
+      "addressStart": 17592186044416,
+      "addressEnd": 17592187092992,
+      "arch": "arm64",
+      "name": "libcoreclr.dylib",
+      "path": "/fake/libcoreclr.dylib",
+      "debugName": "libcoreclr.dylib",
+      "debugPath": "/fake/libcoreclr.dylib",
+      "breakpadId": "000000000000000000000000000000000"
+    },
+    {
+      "addressStart": 35184372088832,
+      "addressEnd": 35184372613120,
+      "arch": "arm64",
+      "name": "libclrjit.dylib",
+      "path": "/fake/libclrjit.dylib",
+      "debugName": "libclrjit.dylib",
+      "debugPath": "/fake/libclrjit.dylib",
+      "breakpadId": "000000000000000000000000000000000"
+    },
+    {
+      "addressStart": 52776558133248,
+      "addressEnd": 52776558395392,
+      "arch": "arm64",
+      "name": "libSystem.Native.dylib",
+      "path": "/fake/libSystem.Native.dylib",
+      "debugName": "libSystem.Native.dylib",
+      "debugPath": "/fake/libSystem.Native.dylib",
+      "breakpadId": "000000000000000000000000000000000"
+    }
+  ],
+  "counters": [
+    {
+      "name": "GCHeapStats",
+      "category": "Memory",
+      "description": "GC Heap Stats",
+      "color": "orange",
+      "pid": "4242",
+      "mainThreadIndex": 0,
+      "samples": {
+        "time": [
+          0,
+          2,
+          5
+        ],
+        "count": [
+          0,
+          2000,
+          3000
+        ],
+        "length": 3
+      }
+    }
+  ],
+  "threads": [
+    {
+      "processType": "default",
+      "processStartupTime": 0,
+      "processShutdownTime": 1000,
+      "registerTime": 0,
+      "unregisterTime": 900,
+      "pausedRanges": [],
+      "showMarkersInTimeline": true,
+      "name": "0 - WorkerA (1001)",
+      "isMainThread": false,
+      "processName": "myapp.exe (4242)",
+      "pid": "4242",
+      "tid": "1001",
+      "samples": {
+        "threadCPUDelta": [
+          10000000,
+          10000000,
+          10000000,
+          10000000,
+          10000000
+        ],
+        "stack": [
+          1,
+          1,
+          2,
+          3,
+          1
+        ],
+        "timeDeltas": [
+          1,
+          1,
+          1,
+          2,
+          1
+        ],
+        "weightType": "samples",
+        "length": 5
+      },
+      "markers": {
+        "data": [
+          {
+            "type": "CC",
+            "fullName": "MyApp.Worker.DoWork",
+            "methodILSize": 42
+          },
+          {
+            "type": "GCMajor",
+            "reason": "AllocSmall",
+            "count": 1,
+            "depth": 0,
+            "gcType": "NonConcurrent",
+            "timings": {
+              "status": ""
+            }
+          },
+          {
+            "type": "dotnet.gc.suspend_execution_engine",
+            "reason": "SuspendForGC",
+            "count": 1
+          },
+          null,
+          {
+            "type": "GCMinor",
+            "allocationAmount": 1024,
+            "allocationKind": "Small",
+            "typeName": "System.String",
+            "heapIndex": 0
+          },
+          {
+            "type": "dotnet.gc.heap_stats",
+            "totalHeapSize": 5000,
+            "totalPromoted": 100,
+            "generationSize0": 1000,
+            "totalPromotedSize0": 10,
+            "generationSize1": 2000,
+            "totalPromotedSize1": 20,
+            "generationSize2": 3000,
+            "totalPromotedSize2": 30,
+            "generationSize3": 4000,
+            "totalPromotedSize3": 40,
+            "generationSize4": 0,
+            "totalPromotedSize4": 0,
+            "finalizationPromotedSize": 0,
+            "finalizationPromotedCount": 0,
+            "pinnedObjectCount": 0,
+            "sinkBlockCount": 0,
+            "gcHandleCount": 10
+          }
+        ],
+        "name": [
+          5,
+          6,
+          7,
+          8,
+          9,
+          10
+        ],
+        "startTime": [
+          1,
+          3,
+          3,
+          4,
+          4.5,
+          5
+        ],
+        "endTime": [
+          3,
+          4,
+          3.5,
+          4,
+          4.5,
+          5
+        ],
+        "phase": [
+          1,
+          1,
+          1,
+          1,
+          0,
+          0
+        ],
+        "category": [
+          5,
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        "threadId": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "length": 6
+      },
+      "stackTable": {
+        "frame": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "category": [
+          3,
+          3,
+          3,
+          6
+        ],
+        "subcategory": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "prefix": [
+          null,
+          0,
+          0,
+          0
+        ],
+        "length": 4
+      },
+      "frameTable": {
+        "address": [
+          -1,
+          -1,
+          -1,
+          8192
+        ],
+        "inlineDepth": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "category": [
+          3,
+          3,
+          3,
+          6
+        ],
+        "subcategory": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "func": [
+          0,
+          1,
+          1,
+          2
+        ],
+        "nativeSymbol": [
+          null,
+          null,
+          null,
+          null
+        ],
+        "innerWindowID": [
+          null,
+          null,
+          null,
+          null
+        ],
+        "implementation": [
+          null,
+          null,
+          null,
+          null
+        ],
+        "line": [
+          null,
+          null,
+          null,
+          null
+        ],
+        "column": [
+          null,
+          null,
+          null,
+          null
+        ],
+        "length": 4
+      },
+      "stringArray": [
+        "MyApp.Program.Main",
+        "MyApp.dll",
+        "MyApp.Worker.DoWork",
+        "libcoreclr.dylib!0x0000100000002000",
+        "libcoreclr.dylib",
+        "JitCompile",
+        "GC Event",
+        "GC Suspend EE",
+        "GC Restart EE",
+        "0 - GC Alloc (1001)",
+        "GCHeapStats"
+      ],
+      "funcTable": {
+        "name": [
+          0,
+          2,
+          3
+        ],
+        "isJS": [
+          false,
+          false,
+          false
+        ],
+        "relevantForJS": [
+          false,
+          false,
+          false
+        ],
+        "resource": [
+          0,
+          0,
+          1
+        ],
+        "fileName": [
+          null,
+          null,
+          null
+        ],
+        "lineNumber": [
+          null,
+          null,
+          null
+        ],
+        "columnNumber": [
+          null,
+          null,
+          null
+        ],
+        "length": 3
+      },
+      "resourceTable": {
+        "lib": [
+          null,
+          0
+        ],
+        "name": [
+          1,
+          4
+        ],
+        "host": [
+          null,
+          null
+        ],
+        "type": [
+          1,
+          1
+        ],
+        "length": 2
+      },
+      "nativeSymbols": {
+        "libIndex": [],
+        "address": [],
+        "name": [],
+        "functionSize": [],
+        "length": 0
+      }
+    },
+    {
+      "processType": "default",
+      "processStartupTime": 0,
+      "processShutdownTime": 1000,
+      "registerTime": 0,
+      "unregisterTime": 1000,
+      "pausedRanges": [],
+      "showMarkersInTimeline": true,
+      "name": "1 - WorkerB (1002)",
+      "isMainThread": false,
+      "processName": "myapp.exe (4242)",
+      "pid": "4242",
+      "tid": "1002",
+      "samples": {
+        "threadCPUDelta": [
+          10000000,
+          10000000
+        ],
+        "stack": [
+          1,
+          2
+        ],
+        "timeDeltas": [
+          1,
+          1
+        ],
+        "weightType": "samples",
+        "length": 2
+      },
+      "markers": {
+        "data": [
+          {
+            "type": "dotnet.gc.heap_stats",
+            "totalHeapSize": 2000,
+            "totalPromoted": 0,
+            "generationSize0": 0,
+            "totalPromotedSize0": 0,
+            "generationSize1": 0,
+            "totalPromotedSize1": 0,
+            "generationSize2": 0,
+            "totalPromotedSize2": 0,
+            "generationSize3": 0,
+            "totalPromotedSize3": 0,
+            "generationSize4": 0,
+            "totalPromotedSize4": 0,
+            "finalizationPromotedSize": 0,
+            "finalizationPromotedCount": 0,
+            "pinnedObjectCount": 0,
+            "sinkBlockCount": 0,
+            "gcHandleCount": 0
+          }
+        ],
+        "name": [
+          5
+        ],
+        "startTime": [
+          2
+        ],
+        "endTime": [
+          2
+        ],
+        "phase": [
+          0
+        ],
+        "category": [
+          4
+        ],
+        "threadId": [
+          1
+        ],
+        "length": 1
+      },
+      "stackTable": {
+        "frame": [
+          0,
+          1,
+          2
+        ],
+        "category": [
+          3,
+          5,
+          0
+        ],
+        "subcategory": [
+          0,
+          0,
+          0
+        ],
+        "prefix": [
+          null,
+          0,
+          null
+        ],
+        "length": 3
+      },
+      "frameTable": {
+        "address": [
+          -1,
+          12288,
+          -1
+        ],
+        "inlineDepth": [
+          0,
+          0,
+          0
+        ],
+        "category": [
+          3,
+          5,
+          0
+        ],
+        "subcategory": [
+          0,
+          0,
+          0
+        ],
+        "func": [
+          0,
+          1,
+          2
+        ],
+        "nativeSymbol": [
+          null,
+          null,
+          null
+        ],
+        "innerWindowID": [
+          null,
+          null,
+          null
+        ],
+        "implementation": [
+          null,
+          null,
+          null
+        ],
+        "line": [
+          null,
+          null,
+          null
+        ],
+        "column": [
+          null,
+          null,
+          null
+        ],
+        "length": 3
+      },
+      "stringArray": [
+        "MyApp.Program.Main",
+        "MyApp.dll",
+        "libclrjit.dylib!0x0000200000003000",
+        "libclrjit.dylib",
+        "0xFFFFFFFFFFFF0000",
+        "GCHeapStats"
+      ],
+      "funcTable": {
+        "name": [
+          0,
+          2,
+          4
+        ],
+        "isJS": [
+          false,
+          false,
+          false
+        ],
+        "relevantForJS": [
+          false,
+          false,
+          false
+        ],
+        "resource": [
+          0,
+          1,
+          -1
+        ],
+        "fileName": [
+          null,
+          null,
+          null
+        ],
+        "lineNumber": [
+          null,
+          null,
+          null
+        ],
+        "columnNumber": [
+          null,
+          null,
+          null
+        ],
+        "length": 3
+      },
+      "resourceTable": {
+        "lib": [
+          null,
+          1
+        ],
+        "name": [
+          1,
+          3
+        ],
+        "host": [
+          null,
+          null
+        ],
+        "type": [
+          1,
+          1
+        ],
+        "length": 2
+      },
+      "nativeSymbols": {
+        "libIndex": [],
+        "address": [],
+        "name": [],
+        "functionSize": [],
+        "length": 0
+      }
+    },
+    {
+      "processType": "default",
+      "processStartupTime": 0,
+      "processShutdownTime": 1000,
+      "registerTime": 0,
+      "unregisterTime": 1000,
+      "pausedRanges": [],
+      "showMarkersInTimeline": true,
+      "name": "2 - Thread (1003)",
+      "isMainThread": false,
+      "processName": "myapp.exe (4242)",
+      "pid": "4242",
+      "tid": "1003",
+      "samples": {
+        "threadCPUDelta": [
+          2000000
+        ],
+        "stack": [
+          1
+        ],
+        "timeDeltas": [
+          1
+        ],
+        "weightType": "samples",
+        "length": 1
+      },
+      "markers": {
+        "data": [],
+        "name": [],
+        "startTime": [],
+        "endTime": [],
+        "phase": [],
+        "category": [],
+        "threadId": [],
+        "length": 0
+      },
+      "stackTable": {
+        "frame": [
+          0,
+          1
+        ],
+        "category": [
+          3,
+          2
+        ],
+        "subcategory": [
+          0,
+          0
+        ],
+        "prefix": [
+          null,
+          0
+        ],
+        "length": 2
+      },
+      "frameTable": {
+        "address": [
+          -1,
+          4096
+        ],
+        "inlineDepth": [
+          0,
+          0
+        ],
+        "category": [
+          3,
+          2
+        ],
+        "subcategory": [
+          0,
+          0
+        ],
+        "func": [
+          0,
+          1
+        ],
+        "nativeSymbol": [
+          null,
+          null
+        ],
+        "innerWindowID": [
+          null,
+          null
+        ],
+        "implementation": [
+          null,
+          null
+        ],
+        "line": [
+          null,
+          null
+        ],
+        "column": [
+          null,
+          null
+        ],
+        "length": 2
+      },
+      "stringArray": [
+        "MyApp.Program.Main",
+        "MyApp.dll",
+        "libSystem.Native.dylib!0x0000300000001000",
+        "libSystem.Native.dylib"
+      ],
+      "funcTable": {
+        "name": [
+          0,
+          2
+        ],
+        "isJS": [
+          false,
+          false
+        ],
+        "relevantForJS": [
+          false,
+          false
+        ],
+        "resource": [
+          0,
+          1
+        ],
+        "fileName": [
+          null,
+          null
+        ],
+        "lineNumber": [
+          null,
+          null
+        ],
+        "columnNumber": [
+          null,
+          null
+        ],
+        "length": 2
+      },
+      "resourceTable": {
+        "lib": [
+          null,
+          2
+        ],
+        "name": [
+          1,
+          3
+        ],
+        "host": [
+          null,
+          null
+        ],
+        "type": [
+          1,
+          1
+        ],
+        "length": 2
+      },
+      "nativeSymbols": {
+        "libIndex": [],
+        "address": [],
+        "name": [],
+        "functionSize": [],
+        "length": 0
+      }
+    }
+  ]
+}

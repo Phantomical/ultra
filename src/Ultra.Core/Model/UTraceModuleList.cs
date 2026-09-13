@@ -90,18 +90,42 @@ public sealed class UTraceModuleList : UGenericList<UTraceModule>
     }
 
     /// <summary>
+    /// Ensures that the native module address ranges consulted by <see cref="TryFindNativeModuleByAddress"/>
+    /// are sorted, performing the sort immediately if it has not happened yet.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="TryFindNativeModuleByAddress"/> otherwise sorts these ranges lazily, on its first call
+    /// after a new module was added. That lazy sort is not safe to trigger from multiple threads
+    /// concurrently (two threads could sort the same span at the same time, or one could binary-search a
+    /// half-sorted array). Callers that call <see cref="TryFindNativeModuleByAddress"/> from more than one
+    /// thread for the same process must call this method once, from a single thread, after all native
+    /// modules have been added and before any concurrent use of <see cref="TryFindNativeModuleByAddress"/>.
+    /// </remarks>
+    public void EnsureNativeModuleAddressRangesSorted()
+    {
+        if (_loadedModuleAddressRangesSorted)
+        {
+            return;
+        }
+
+        _loadedModuleAddressRanges.AsSpan().SortByRef(new UAddressRangeComparer());
+        _loadedModuleAddressRangesSorted = true;
+    }
+
+    /// <summary>
     /// Tries to find a module by its address.
     /// </summary>
     /// <param name="address">The address of the module.</param>
     /// <param name="module">The module found, if any.</param>
     /// <returns>True if the module was found, otherwise false.</returns>
+    /// <remarks>
+    /// This performs a lazy sort of the address ranges on its first call after a new module was added; see
+    /// <see cref="EnsureNativeModuleAddressRangesSorted"/> for the thread-safety caveat this implies when
+    /// this method is called concurrently from multiple threads.
+    /// </remarks>
     public bool TryFindNativeModuleByAddress(UAddress address, [NotNullWhen(true)] out UTraceNativeModule? module)
     {
-        if (!_loadedModuleAddressRangesSorted)
-        {
-            _loadedModuleAddressRanges.AsSpan().SortByRef(new UAddressRangeComparer());
-            _loadedModuleAddressRangesSorted = true;
-        }
+        EnsureNativeModuleAddressRangesSorted();
 
         var ranges = _loadedModuleAddressRanges.AsSpan();
         var comparer = new UAddressRangeFinder(address);
