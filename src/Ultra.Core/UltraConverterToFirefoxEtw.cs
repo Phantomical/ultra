@@ -1697,7 +1697,10 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             var fullMethodName = profileThread.StringArray[nameIndex];
             // Hack to distinguish GC methods
             // https://github.com/dotnet/runtime/blob/af3393d3991b7aab608e514e4a4be3ae2bbafbf8/src/coreclr/gc/gc.cpp#L49-L53
-            var isGC = fullMethodName.StartsWith("WKS::gc", StringComparison.OrdinalIgnoreCase) || fullMethodName.StartsWith("SVR::gc", StringComparison.OrdinalIgnoreCase);
+            // Mono's SGen collector exports its own C functions with a `sgen_` prefix instead.
+            var isGC = fullMethodName.StartsWith("WKS::gc", StringComparison.OrdinalIgnoreCase)
+                || fullMethodName.StartsWith("SVR::gc", StringComparison.OrdinalIgnoreCase)
+                || fullMethodName.StartsWith("sgen_", StringComparison.OrdinalIgnoreCase);
             if (isGC)
             {
                 category = CategoryGc;
