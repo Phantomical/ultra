@@ -188,151 +188,317 @@ public abstract class UltraProfiler : IDisposable
             processName = Path.GetFileNameWithoutExtension(ultraProfilerOptions.ProgramPath);
         }
 
-        var currentTime = DateTime.Now;
-        var baseName = processName != null ? $"ultra_{processName}_{currentTime:yyyy-MM-dd_HH_mm_ss}" : $"ultra_{currentTime:yyyy-MM-dd_HH_mm_ss}";
-
-        // Append the pid for a single process that we are attaching to
-        if (singleProcess is not null)
+        // When an explicit output name was requested together with Paused mode, a single Run() call can
+        // produce several captures, so we fold the requested name into each capture's own (timestamped)
+        // base name instead of letting every capture overwrite the same output file.
+        var explicitOutputBaseName = ultraProfilerOptions.BaseOutputFileName;
+        if (ultraProfilerOptions.Paused && explicitOutputBaseName is not null)
         {
-            baseName = $"{baseName}_pid_{singleProcess.Id}";
+            ultraProfilerOptions.BaseOutputFileName = null;
         }
 
-        ProfilerClock.Restart();
-        LastTimeProgress = ProfilerClock.Elapsed;
+        bool programHasBeenStarted = false;
+        bool hasCompletedACapture = false;
+        string? lastJsonFinalFile = null;
+        int captureIndex = 0;
 
-        var runner = CreateRunner(ultraProfilerOptions, processList, baseName, singleProcess);
+        // Captures that are still saving (rundown/merge/convert) in the background - in Paused mode, a new
+        // capture can start profiling as soon as this one is stopped, without waiting for this list to drain.
+        List<Task<string?>> pendingSaves = new();
+
         try
         {
-            await runner.OnStart();
+            while (true)
             {
-                var startTheRequestedProgramIfRequired = async () =>
+                captureIndex++;
+                var thisCaptureIndex = captureIndex;
+
+                var currentTime = DateTime.Now;
+                var baseName = explicitOutputBaseName is not null
+                    ? $"{explicitOutputBaseName}_{currentTime:yyyy-MM-dd_HH_mm_ss}"
+                    : CaptureBaseNameBuilder.Build(processName, currentTime, singleProcess?.Id);
+
+                // Each capture gets its own copy of the options so that its progress/status messages (both
+                // while profiling live and while saving in the background afterwards) can be tagged with its
+                // own index instead of racing on the single shared LogProgress/LogStepProgress delegates.
+                var cycleOptions = ultraProfilerOptions.Paused
+                    ? CreateCaptureReportingOptions(ultraProfilerOptions, thisCaptureIndex)
+                    : ultraProfilerOptions;
+
+                ProfilerClock.Restart();
+                LastTimeProgress = ProfilerClock.Elapsed;
+
+                var runner = CreateRunner(cycleOptions, processList, baseName, singleProcess);
+                bool quitBeforeCapture = false;
+                var cycleControlAction = ProfilingControlAction.None;
+                bool allProcessesExitedThisCycle = false;
+                try
                 {
-                    // Start a command line process if needed
-                    if (ultraProfilerOptions.ProgramPath is not null)
+                    await runner.OnStart();
                     {
-                        var processState = await StartProcess(runner, ultraProfilerOptions);
-                        processList.Add(processState.Process);
-                        // Append the pid for a single process that we are attaching to
-                        if (singleProcess is null)
+                        var startTheRequestedProgramIfRequired = async () =>
                         {
-                            baseName = $"{baseName}_pid_{processState.Process.Id}";
-                            runner.BaseFileName = baseName;
+                            // Start a command line process if needed (only once, even across multiple captures)
+                            if (cycleOptions.ProgramPath is not null && !programHasBeenStarted)
+                            {
+                                programHasBeenStarted = true;
+                                var processState = await StartProcess(runner, cycleOptions);
+                                processList.Add(processState.Process);
+                                // Append the pid for a single process that we are attaching to
+                                if (singleProcess is null)
+                                {
+                                    baseName = $"{baseName}_pid_{processState.Process.Id}";
+                                    runner.BaseFileName = baseName;
+                                }
+
+                                singleProcess ??= processState.Process;
+                            }
+                        };
+
+                        // If we have a delay, or we are asked to start paused, we start the process before the profiling starts
+                        // On macOS we always need to start the program before enabling profiling
+                        bool hasExplicitProgramHasStarted = cycleOptions.DelayInSeconds != 0.0 || cycleOptions.Paused || OperatingSystem.IsMacOS();
+                        if (hasExplicitProgramHasStarted)
+                        {
+                            await startTheRequestedProgramIfRequired();
                         }
 
-                        singleProcess ??= processState.Process;
-                    }
-                };
-
-                // If we have a delay, or we are asked to start paused, we start the process before the profiling starts
-                // On macOS we always need to start the program before enabling profiling
-                bool hasExplicitProgramHasStarted = ultraProfilerOptions.DelayInSeconds != 0.0 || ultraProfilerOptions.Paused || OperatingSystem.IsMacOS();
-                if (hasExplicitProgramHasStarted)
-                {
-                    await startTheRequestedProgramIfRequired();
-                }
-
-                // Wait for the process to start
-                if (ultraProfilerOptions.Paused)
-                {
-                    while (!ultraProfilerOptions.ShouldStartProfiling!() && !CancelRequested && !StopRequested)
-                    {
-                    }
-
-                    // If we have a cancel request, we don't start the profiling
-                    if (CancelRequested || StopRequested)
-                    {
-                        throw new InvalidOperationException("CTRL+C requested");
-                    }
-                }
-
-                await EnableProfiling(runner, ultraProfilerOptions);
-
-                // If we haven't started the program yet, we start it now (for explicit program path)
-                if (!hasExplicitProgramHasStarted)
-                {
-                    await startTheRequestedProgramIfRequired();
-                }
-
-                foreach (var process in processList)
-                {
-                    ultraProfilerOptions.LogProgress?.Invoke($"Start Profiling Process {process.ProcessName} ({process.Id})");
-                }
-
-                // Collect the data until all processes have exited or there is a cancel request
-                HashSet<Process> exitedProcessList = new();
-                while (!CancelRequested)
-                {
-                    // Exit if we have reached the duration
-                    if (ProfilerClock.Elapsed.TotalSeconds > ultraProfilerOptions.DurationInSeconds)
-                    {
-                        ultraProfilerOptions.LogProgress?.Invoke($"Stopping profiling, max duration reached at {ultraProfilerOptions.DurationInSeconds}s");
-                        break;
-                    }
-
-                    if (ProfilerClock.Elapsed.TotalMilliseconds - LastTimeProgress.TotalMilliseconds > ultraProfilerOptions.UpdateLogAfterInMs)
-                    {
-                        var totalFileNameLength = runner.OnProfiling();
-
-                        ultraProfilerOptions.LogStepProgress?.Invoke(singleProcess is not null
-                            ? $"Profiling Process {singleProcess.ProcessName} ({singleProcess.Id}) - {(int)ProfilerClock.Elapsed.TotalSeconds}s - {ByteSize.FromBytes(totalFileNameLength)}"
-                            : $"Profiling {processList.Count} Processes - {(int)ProfilerClock.Elapsed.TotalSeconds}s - {ByteSize.FromBytes(totalFileNameLength)}");
-                        LastTimeProgress = ProfilerClock.Elapsed;
-                    }
-
-                    await Task.Delay(ultraProfilerOptions.CheckDeltaTimeInMs);
-
-                    foreach (var process in processList)
-                    {
-                        if (process.HasExited && exitedProcessList.Add(process))
+                        // Wait for the process to start
+                        if (cycleOptions.Paused)
                         {
-                            ultraProfilerOptions.LogProgress?.Invoke($"Process {process.ProcessName} ({process.Id}) has exited");
+                            while (!cycleOptions.ShouldStartProfiling!() && !CancelRequested && !StopRequested)
+                            {
+                            }
+
+                            // If we have a cancel request, we don't start the profiling
+                            if (CancelRequested || StopRequested)
+                            {
+                                if (!hasCompletedACapture)
+                                {
+                                    throw new InvalidOperationException("CTRL+C requested");
+                                }
+
+                                quitBeforeCapture = true;
+                            }
+                        }
+
+                        if (!quitBeforeCapture)
+                        {
+                            await EnableProfiling(runner, cycleOptions);
+
+                            // If we haven't started the program yet, we start it now (for explicit program path)
+                            if (!hasExplicitProgramHasStarted)
+                            {
+                                await startTheRequestedProgramIfRequired();
+                            }
+
+                            if (cycleOptions.Paused)
+                            {
+                                cycleOptions.CaptureStarted?.Invoke(thisCaptureIndex);
+                            }
+
+                            foreach (var process in processList)
+                            {
+                                cycleOptions.LogProgress?.Invoke($"Start Profiling Process {process.ProcessName} ({process.Id})");
+                            }
+
+                            // Collect the data until all processes have exited, there is a cancel request,
+                            // or the user asked (in Paused mode) to stop or quit.
+                            HashSet<Process> exitedProcessList = new();
+                            while (!CancelRequested)
+                            {
+                                // Exit if we have reached the duration
+                                if (ProfilerClock.Elapsed.TotalSeconds > cycleOptions.DurationInSeconds)
+                                {
+                                    cycleOptions.LogProgress?.Invoke($"Stopping profiling, max duration reached at {cycleOptions.DurationInSeconds}s");
+                                    break;
+                                }
+
+                                if (cycleOptions.Paused && cycleOptions.PollProfilingControlAction is { } pollProfilingControlAction)
+                                {
+                                    var action = pollProfilingControlAction();
+                                    if (action == ProfilingControlAction.Stop || action == ProfilingControlAction.Quit)
+                                    {
+                                        cycleControlAction = action;
+                                        break;
+                                    }
+                                }
+
+                                if (ProfilerClock.Elapsed.TotalMilliseconds - LastTimeProgress.TotalMilliseconds > cycleOptions.UpdateLogAfterInMs)
+                                {
+                                    var totalFileNameLength = runner.OnProfiling();
+
+                                    cycleOptions.LogStepProgress?.Invoke(singleProcess is not null
+                                        ? $"Profiling Process {singleProcess.ProcessName} ({singleProcess.Id}) - {(int)ProfilerClock.Elapsed.TotalSeconds}s - {ByteSize.FromBytes(totalFileNameLength)}"
+                                        : $"Profiling {processList.Count} Processes - {(int)ProfilerClock.Elapsed.TotalSeconds}s - {ByteSize.FromBytes(totalFileNameLength)}");
+                                    LastTimeProgress = ProfilerClock.Elapsed;
+                                }
+
+                                await Task.Delay(cycleOptions.CheckDeltaTimeInMs);
+
+                                foreach (var process in processList)
+                                {
+                                    if (process.HasExited && exitedProcessList.Add(process))
+                                    {
+                                        cycleOptions.LogProgress?.Invoke($"Process {process.ProcessName} ({process.Id}) has exited");
+                                    }
+                                }
+
+                                if (exitedProcessList.Count == processList.Count)
+                                {
+                                    break;
+                                }
+
+                            } // Needed for JIT Compile code that was already compiled.
+
+                            allProcessesExitedThisCycle = processList.Count > 0 && exitedProcessList.Count == processList.Count;
+
+                            cycleOptions.LogProgress?.Invoke(singleProcess is not null ? $"End Profiling Process" : $"End Profiling {processList.Count} Processes");
+
+                            await runner.OnStop();
                         }
                     }
+                }
+                catch
+                {
+                    await runner.OnCatch();
+                    throw;
+                }
+                finally
+                {
+                    await runner.OnFinally();
+                    CleanCancel?.Set();
+                }
 
-                    if (exitedProcessList.Count == processList.Count)
-                    {
-                        break;
-                    }
+                if (StopRequested)
+                {
+                    throw new InvalidOperationException("CTRL+C requested");
+                }
 
-                } // Needed for JIT Compile code that was already compiled.
+                if (quitBeforeCapture)
+                {
+                    // Discards any per-cycle session/temp-file state OnStart() created (e.g. the ETW
+                    // kernel/user .etl files) for this abandoned capture.
+                    await runner.OnCatch();
+                    break;
+                }
 
-                ultraProfilerOptions.LogProgress?.Invoke(singleProcess is not null ? $"End Profiling Process" : $"End Profiling {processList.Count} Processes");
+                hasCompletedACapture = true;
 
-                await runner.OnStop();
+                if (cycleOptions.Paused)
+                {
+                    cycleOptions.CaptureSaving?.Invoke(thisCaptureIndex);
+                }
+
+                // Save (rundown/merge/convert) this capture. In Paused mode this runs in the background so
+                // that the next capture can start profiling right away; otherwise it is awaited immediately.
+                var pidsSnapshot = processList.Select(x => x.Id).ToList();
+                var saveTask = SaveCaptureAsync(runner, baseName, pidsSnapshot, thisCaptureIndex, cycleOptions, ultraProfilerOptions);
+                if (cycleOptions.Paused)
+                {
+                    pendingSaves.Add(saveTask);
+                }
+                else
+                {
+                    lastJsonFinalFile = await saveTask ?? lastJsonFinalFile;
+                }
+
+                if (!PausedSessionPlanner.ShouldWaitForAnotherCapture(ultraProfilerOptions.Paused, cycleControlAction, CancelRequested, allProcessesExitedThisCycle))
+                {
+                    break;
+                }
             }
-        }
-        catch
-        {
-            await runner.OnCatch();
-            throw;
+
+            if (pendingSaves.Count > 0)
+            {
+                var results = await Task.WhenAll(pendingSaves);
+                foreach (var result in results)
+                {
+                    if (result is not null)
+                    {
+                        lastJsonFinalFile = result;
+                    }
+                }
+            }
         }
         finally
         {
-            await runner.OnFinally();
-            CleanCancel?.Set();
+            // If the session ended abruptly (e.g. a hard CTRL+C abort) while a capture was still saving in
+            // the background, make sure its exception (already reported via CaptureFailed) is observed
+            // instead of surfacing later as an unobserved task exception.
+            foreach (var pendingSave in pendingSaves)
+            {
+                if (!pendingSave.IsCompleted)
+                {
+                    _ = pendingSave.ContinueWith(static t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+                }
+            }
+
+            if (ultraProfilerOptions.Paused && explicitOutputBaseName is not null)
+            {
+                ultraProfilerOptions.BaseOutputFileName = explicitOutputBaseName;
+            }
         }
 
-        if (StopRequested)
+        return lastJsonFinalFile ?? string.Empty;
+    }
+
+    /// <summary>
+    /// Creates a per-capture copy of <paramref name="ultraProfilerOptions"/> whose progress/status
+    /// delegates report through <see cref="UltraProfilerOptions.CaptureStatusChanged"/>, tagged with
+    /// <paramref name="captureIndex"/>.
+    /// </summary>
+    private static UltraProfilerOptions CreateCaptureReportingOptions(UltraProfilerOptions ultraProfilerOptions, int captureIndex)
+    {
+        var cycleOptions = ultraProfilerOptions.Clone();
+
+        cycleOptions.LogProgress = message => ultraProfilerOptions.CaptureStatusChanged?.Invoke(captureIndex, message);
+        cycleOptions.LogStepProgress = message => ultraProfilerOptions.CaptureStatusChanged?.Invoke(captureIndex, message);
+        cycleOptions.WaitingFileToComplete = file => ultraProfilerOptions.CaptureStatusChanged?.Invoke(captureIndex, $"Waiting for {Path.GetFileName(file)} to complete");
+        cycleOptions.WaitingFileToCompleteTimeOut = file => ultraProfilerOptions.CaptureStatusChanged?.Invoke(captureIndex, $"Timeout waiting for {Path.GetFileName(file)} to complete");
+
+        return cycleOptions;
+    }
+
+    /// <summary>
+    /// Finishes and converts a single capture (CLR rundown, ETL merge, JSON conversion) and cleans up its
+    /// intermediate files. Used both for the single, synchronously-awaited capture of a non-Paused run and,
+    /// in Paused mode, as the body of a capture's background save task.
+    /// </summary>
+    private async Task<string?> SaveCaptureAsync(ProfilerRunner runner, string baseName, List<int> pids, int captureIndex, UltraProfilerOptions cycleOptions, UltraProfilerOptions ultraProfilerOptions)
+    {
+        try
         {
-            throw new InvalidOperationException("CTRL+C requested");
+            var traceFiles = await runner.FinishFileToConvert();
+
+            if (StopRequested)
+            {
+                throw new InvalidOperationException("CTRL+C requested");
+            }
+
+            string? jsonFinalFile = null;
+            if (traceFiles.Count > 0)
+            {
+                jsonFinalFile = await Convert(baseName, traceFiles, pids, cycleOptions);
+                if (ultraProfilerOptions.Paused)
+                {
+                    ultraProfilerOptions.CaptureCompleted?.Invoke(captureIndex, jsonFinalFile);
+                }
+            }
+
+            await runner.OnFinalCleanup();
+
+            return jsonFinalFile;
         }
-
-        var traceFiles = await runner.FinishFileToConvert();
-
-        if (StopRequested)
+        catch (Exception ex)
         {
-            throw new InvalidOperationException("CTRL+C requested");
+            if (ultraProfilerOptions.Paused)
+            {
+                ultraProfilerOptions.CaptureFailed?.Invoke(captureIndex, ex);
+            }
+
+            throw;
         }
-
-        string jsonFinalFile = string.Empty;
-        if (traceFiles.Count > 0)
-        {
-            jsonFinalFile = await Convert(baseName, traceFiles, processList.Select(x => x.Id).ToList(), ultraProfilerOptions);
-        }
-
-        await runner.OnFinalCleanup();
-
-        return jsonFinalFile;
     }
 
 

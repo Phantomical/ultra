@@ -114,6 +114,47 @@ public class UltraProfilerOptions
     public Func<bool>? ShouldStartProfiling { get; set; }
 
     /// <summary>
+    /// Gets or sets a function that is polled periodically while a capture is actively profiling, in
+    /// <see cref="Paused"/> mode, to check whether the user requested to stop just the current capture
+    /// (saving it and waiting for a new one to start) or to quit the profiling session entirely.
+    /// Returning <see cref="ProfilingControlAction.None"/> keeps the current capture running. Ignored when
+    /// <see cref="Paused"/> is <c>false</c>.
+    /// </summary>
+    public Func<ProfilingControlAction>? PollProfilingControlAction { get; set; }
+
+    /// <summary>
+    /// Gets or sets the callback invoked once a capture (1-based index within this <see cref="Paused"/>
+    /// session) starts actively profiling.
+    /// </summary>
+    public Action<int>? CaptureStarted { get; set; }
+
+    /// <summary>
+    /// Gets or sets the callback invoked once a capture (1-based index) stops actively profiling and moves
+    /// to its save phase (rundown/merge/convert), which can run in the background while a new capture
+    /// starts profiling.
+    /// </summary>
+    public Action<int>? CaptureSaving { get; set; }
+
+    /// <summary>
+    /// Gets or sets the callback invoked with a status message for a specific capture (1-based index),
+    /// covering both its live profiling phase and the save phase (rundown/merge/convert) that follows it.
+    /// In <see cref="Paused"/> mode, a new capture can start profiling while an earlier one is still
+    /// saving in the background, so more than one index can report through this callback at the same time.
+    /// </summary>
+    public Action<int, string>? CaptureStatusChanged { get; set; }
+
+    /// <summary>
+    /// Gets or sets the callback invoked once a capture (1-based index) has finished saving, with the path
+    /// to its output file.
+    /// </summary>
+    public Action<int, string>? CaptureCompleted { get; set; }
+
+    /// <summary>
+    /// Gets or sets the callback invoked if saving a capture (1-based index) fails.
+    /// </summary>
+    public Action<int, Exception>? CaptureFailed { get; set; }
+
+    /// <summary>
     /// Gets or sets a value indicating whether to keep intermediate ETL files.
     /// </summary>
     public bool KeepEtlIntermediateFiles { get; set; }
@@ -154,6 +195,13 @@ public class UltraProfilerOptions
     /// other positive value is used as-is as the maximum number of worker threads.
     /// </remarks>
     public int MaxDegreeOfParallelism { get; set; }
+
+    /// <summary>
+    /// Creates a shallow copy of these options, used by <see cref="UltraProfiler"/> to give each capture of
+    /// a <see cref="Paused"/> session its own reporting delegates (see <see cref="CaptureStatusChanged"/>)
+    /// while sharing every other setting.
+    /// </summary>
+    internal UltraProfilerOptions Clone() => (UltraProfilerOptions)MemberwiseClone();
 
     /// <summary>
     /// Ensures that the directory for the base output file name exists.
