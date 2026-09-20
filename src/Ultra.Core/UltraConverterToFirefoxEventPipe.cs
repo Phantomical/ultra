@@ -668,6 +668,12 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
             {
                 category = CategoryGc;
             }
+            // Mono's SGen collector exports its own C functions with a `sgen_` prefix, in whichever module
+            // hosts the Mono runtime rather than CoreCLR's.
+            else if (funcName.StartsWith("sgen_", StringComparison.Ordinal))
+            {
+                category = CategoryGc;
+            }
 
             if (CppDemangler.IsMangled(funcName))
             {
