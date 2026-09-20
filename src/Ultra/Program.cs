@@ -141,7 +141,6 @@ internal class Program
                             // so that CTRL+C keeps being readable as a key here instead of raising CancelKeyPress.
                             Console.TreatControlCAsInput = true;
 
-                            board.LogText("[green]Press SPACE or ENTER to start profiling, or Q to quit[/]");
                             var key = Console.ReadKey(true);
                             var action = ProfilingControlKeyMapper.Map(key.Key, key.Modifiers);
                             bool startProfiling = action == ProfilingControlAction.Start;
@@ -154,12 +153,7 @@ internal class Program
 
                             if (action == ProfilingControlAction.Quit)
                             {
-                                board.LogText("[darkorange]Quit requested[/]");
                                 etwProfiler.Cancel();
-                            }
-                            else if (!startProfiling)
-                            {
-                                board.LogText($"[darkorange]Key pressed {key.Modifiers} {key.Key}[/]");
                             }
 
                             return startProfiling;
@@ -173,18 +167,7 @@ internal class Program
                             }
 
                             var key = Console.ReadKey(true);
-                            var action = ProfilingControlKeyMapper.Map(key.Key, key.Modifiers);
-
-                            if (action == ProfilingControlAction.Stop)
-                            {
-                                board.LogText("[green]Stopping this capture (press SPACE or ENTER to start a new one, Q to quit)[/]");
-                            }
-                            else if (action == ProfilingControlAction.Quit)
-                            {
-                                board.LogText("[darkorange]Stopping this capture and quitting[/]");
-                            }
-
-                            return action;
+                            return ProfilingControlKeyMapper.Map(key.Key, key.Modifiers);
                         };
 
                         await AnsiConsole.Live(board.Display)
