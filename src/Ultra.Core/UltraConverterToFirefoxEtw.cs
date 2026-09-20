@@ -267,6 +267,16 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         public List<(double, GCHeapStatsEvent)> GcHeapStatsEvents { get; }
 
         public Dictionary<CallStackIndex, int> MapCallStackIndexToFirefox { get; } = new();
+
+        /// <summary>
+        /// Parallel to <see cref="ProfileThread"/>'s stack table: whether Firefox stack node <c>i</c> is
+        /// itself, or is a descendant of, a frame resolving to one of <see cref="SgenGcRootFunctionNames"/>.
+        /// Lets <see cref="ConvertCallStack(CallStackIndex, int, ThreadConvertContext)"/> categorize an entire
+        /// SGen collection/worker-thread subtree as GC even where a callee's own symbol (e.g. a libc helper)
+        /// does not carry a <c>sgen_</c> name.
+        /// </summary>
+        public List<bool> StackInGcSubtree { get; } = new();
+
         public Dictionary<CodeAddressIndex, int> MapCodeAddressIndexToFirefox { get; } = new();
         public Dictionary<CodeAddressIndex, int> MapCodeAddressIndexToMethodIndexFirefox { get; } = new();
         public Dictionary<MethodIndex, int> MapMethodIndexToFirefox { get; } = new();
@@ -310,6 +320,8 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         {
             MapCallStackIndexToFirefox.Clear();
             MapCallStackIndexToFirefox.TrimExcess();
+            StackInGcSubtree.Clear();
+            StackInGcSubtree.TrimExcess();
             MapCodeAddressIndexToFirefox.Clear();
             MapCodeAddressIndexToFirefox.TrimExcess();
             MapCodeAddressIndexToMethodIndexFirefox.Clear();
@@ -1608,13 +1620,45 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         var codeAddressIndex = _traceLog.CallStacks.CodeAddressIndex(callStackIndex);
         var frameTableIndex = ConvertFrame(codeAddressIndex, context, out var category, out var subCategory);
 
+        // Propagate GC categorization down an SGen collection/worker-thread subtree, so callees that don't
+        // carry a `sgen_`-prefixed symbol of their own (e.g. a libc helper called while collecting) are still
+        // attributed to GC. Kernel frames are excluded: a syscall made from GC code is still kernel work, not
+        // GC work. This category is per call-stack node, not per frame - see ConvertFrame's cache comment.
+        var parentInGcSubtree = firefoxParentCallStackIndex >= 0 && context.StackInGcSubtree[firefoxParentCallStackIndex];
+        var inGcSubtree = parentInGcSubtree || IsSgenGcRootFunction(frameTableIndex, context);
+        if (inGcSubtree && category != CategoryKernel)
+        {
+            category = CategoryGc;
+        }
+
         stackTable.Frame.Add(frameTableIndex);
         stackTable.Category.Add(category);
         stackTable.Subcategory.Add(subCategory);
         stackTable.Prefix.Add(firefoxParentCallStackIndex < 0 ? null : (int)firefoxParentCallStackIndex);
         stackTable.Length++;
 
+        context.StackInGcSubtree.Add(inGcSubtree);
+
         return firefoxCallStackIndex;
+    }
+
+    /// <summary>
+    /// The entry points of Mono's SGen collector whose entire callee subtree - not just frames whose own
+    /// symbol happens to start with <c>sgen_</c> - should be categorized as GC: the collection routine itself,
+    /// and the dedicated GC worker thread's main function (which does nothing else).
+    /// </summary>
+    private static readonly string[] SgenGcRootFunctionNames = ["sgen_perform_collection_inner", "sgen_thread_func"];
+
+    /// <summary>
+    /// Whether the resolved frame at <paramref name="frameTableIndex"/> is one of <see cref="SgenGcRootFunctionNames"/>.
+    /// </summary>
+    private static bool IsSgenGcRootFunction(int frameTableIndex, ThreadConvertContext context)
+    {
+        var profileThread = context.ProfileThread;
+        var funcIndex = profileThread.FrameTable.Func[frameTableIndex];
+        var nameIndex = profileThread.FuncTable.Name[funcIndex];
+        var name = profileThread.StringArray[nameIndex];
+        return Array.Exists(SgenGcRootFunctionNames, candidate => string.Equals(candidate, name, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
