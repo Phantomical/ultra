@@ -144,7 +144,10 @@ Usage: ultra profile [Options] <pid | -- execName arg0 arg1...>
                                       Local\Temp\SymbolCache*https://msdl.microsoft.com/download/symbols;SRV*C:\
                                       Users\alexa\AppData\Local\Temp\SymbolCache*https://symbols.nuget.org/download/
                                       symbols`.
-      --paused                      Launch the profiler paused and wait for SPACE or ENTER keys to be pressed.
+      --paused                      Launch the profiler paused and wait for SPACE or ENTER to start
+                                      profiling. While profiling, press S to stop and save that capture
+                                      and wait for a new one, or Q to stop and quit. You can start/stop
+                                      as many captures as you want before quitting.
       --delay=VALUE                 Starts profiling after a specific delay (seconds). Default is 0s.
       --duration=VALUE              Run the profiler for a maximum duration (seconds). Default is 120s
       --keep-merged-etl-file        Keep the merged ETL file.
@@ -155,6 +158,33 @@ Usage: ultra profile [Options] <pid | -- execName arg0 arg1...>
                                       together in a raw output. `live` is going to mix ultra and program output
                                       within a live table.
 ```
+
+#### Capturing multiple profiles in one paused session
+
+With `--paused`, you don't have to exit ultra to capture more than one profile, and you don't have to
+wait for one capture to finish saving before starting the next one. Each SPACE/ENTER → S cycle produces
+its own `.json.gz` file; saving a capture (CLR rundown, ETL merge, JSON conversion) happens in the
+background, so you can immediately press SPACE/ENTER again to start capturing while an earlier one is
+still being saved. The profiled process (or `--pid` target) keeps running the whole time.
+
+Because more than one capture can be active at once (one profiling live, others still saving), ultra
+shows one status row per capture:
+
+```console
+$ ultra.exe profile --paused -- my_command.exe arg0 arg1 arg2...
+┌───────────┬──────────────────────────────────────────────────────────────────────┐
+│ Capture   │ Status                                                                │
+├───────────┼──────────────────────────────────────────────────────────────────────┤
+│ Capture 1 │ ✓ Done - Saved -> ultra_my_command_..._pid_1234.json.gz (4.1MB)        │
+│ Capture 2 │ ⠋ Saving - Merging ETL Files                                          │
+│ Capture 3 │ ⠋ Profiling - Profiling Process my_command (1234) - 3s - 820KB        │
+└───────────┴──────────────────────────────────────────────────────────────────────┘
+```
+
+- Press `S` while profiling to stop and save just the current capture, then wait for another one to start.
+- Press `Q` (while waiting or while profiling) to stop and save the current capture (if any) and quit; ultra waits for every capture still saving in the background before it exits.
+- `CTRL+C`: press once to stop and save the current capture and quit, waiting for any background saves; press again to abort immediately without saving anything still in flight.
+- `--duration` caps each individual capture, not the whole session; once it is reached, that capture moves to saving and ultra waits for the next one.
 
 ### Convert
 

@@ -44,7 +44,7 @@ internal class Program
                 { "pid=", "The {PID} of the process to attach the profiler to.", (int pid) => { pidList.Add(pid); } },
                 { "sampling-interval=", $"The {{VALUE}} of the sample interval in ms. Default is {options.CpuSamplingIntervalInMs:0.000}ms{(OperatingSystem.IsWindows() ? " (8190Hz)" : ", minimum is 1ms on macOS")}.", (float v) => options.CpuSamplingIntervalInMs  = v },
                 { "symbol-path=", $"The {{VALUE}} of symbol path. The default value is `{options.GetCachedSymbolPath()}`.", v => options.SymbolPathText  = v },
-                { "paused", "Launch the profiler paused and wait for SPACE or ENTER keys to be pressed.", v => options.Paused = v is not null },
+                { "paused", "Launch the profiler paused and wait for SPACE or ENTER to start profiling. While profiling, press S to stop and save that capture and wait for a new one, or Q to stop and quit. You can start/stop as many captures as you want before quitting.", v => options.Paused = v is not null },
                 { "delay=", $"Starts profiling after a specific delay (seconds). Default is {options.DelayInSeconds}s.", (double delay) => options.DelayInSeconds = delay },
                 { "duration=", $"Run the profiler for a maximum duration (seconds). Default is {options.DurationInSeconds}s", (double duration) => options.DurationInSeconds = duration },
                 { "keep-merged-etl-file", "Keep the merged ETL file.", v => options.KeepMergedEtl = v is not null },
@@ -115,39 +115,93 @@ internal class Program
                         }
                     };
 
-                    // Handle paused
+                    // A Paused session can capture more than once, and a new capture can start profiling
+                    // while an earlier one is still saving in the background, so ultra's status is shown
+                    // as one row per active/working capture.
                     if (options.Paused)
                     {
-                        Console.TreatControlCAsInput = true;
+                        var board = new CaptureBoard();
+
+                        options.CaptureStarted = board.CaptureStarted;
+                        options.CaptureSaving = board.CaptureSaving;
+                        options.CaptureStatusChanged = board.StatusChanged;
+                        options.CaptureCompleted = board.Completed;
+                        options.CaptureFailed = board.Failed;
+
+                        if (options.ConsoleMode != UltraProfilerConsoleMode.Silent)
+                        {
+                            options.ProgramLogStdout = board.LogText;
+                            options.ProgramLogStderr = board.LogText;
+                        }
 
                         options.ShouldStartProfiling = () =>
                         {
-                            AnsiConsole.MarkupLine("[green]Press SPACE or ENTER to start profiling[/]");
-                            var key = Console.ReadKey(true);
-                            bool startProfiling = key.Key == ConsoleKey.Spacebar || key.Key == ConsoleKey.Enter;
+                            // Re-armed on every wait (a Paused session can wait for a start several times),
+                            // so that CTRL+C keeps being readable as a key here instead of raising CancelKeyPress.
+                            Console.TreatControlCAsInput = true;
 
-                            bool isCtrlC = key.Modifiers == ConsoleModifiers.Control && key.Key == ConsoleKey.C;
-                            if (startProfiling || isCtrlC)
+                            board.LogText("[green]Press SPACE or ENTER to start profiling, or Q to quit[/]");
+                            var key = Console.ReadKey(true);
+                            var action = ProfilingControlKeyMapper.Map(key.Key, key.Modifiers);
+                            bool startProfiling = action == ProfilingControlAction.Start;
+
+                            if (startProfiling || action == ProfilingControlAction.Quit)
                             {
                                 // Restore the default behavior so that CancelKeyPress will be called later if CTRL+C is pressed
                                 Console.TreatControlCAsInput = false;
                             }
 
-                            if (isCtrlC)
+                            if (action == ProfilingControlAction.Quit)
                             {
-                                AnsiConsole.MarkupLine("[darkorange]Cancelled via CTRL+C[/]");
+                                board.LogText("[darkorange]Quit requested[/]");
                                 etwProfiler.Cancel();
                             }
                             else if (!startProfiling)
                             {
-                                AnsiConsole.MarkupLine($"[darkorange]Key pressed {key.Modifiers} {key.Key}[/]");
+                                board.LogText($"[darkorange]Key pressed {key.Modifiers} {key.Key}[/]");
                             }
-                            
+
                             return startProfiling;
                         };
-                    }
 
-                    if (options.ConsoleMode == UltraProfilerConsoleMode.Silent)
+                        options.PollProfilingControlAction = () =>
+                        {
+                            if (Console.IsInputRedirected || !Console.KeyAvailable)
+                            {
+                                return ProfilingControlAction.None;
+                            }
+
+                            var key = Console.ReadKey(true);
+                            var action = ProfilingControlKeyMapper.Map(key.Key, key.Modifiers);
+
+                            if (action == ProfilingControlAction.Stop)
+                            {
+                                board.LogText("[green]Stopping this capture (press SPACE or ENTER to start a new one, Q to quit)[/]");
+                            }
+                            else if (action == ProfilingControlAction.Quit)
+                            {
+                                board.LogText("[darkorange]Stopping this capture and quitting[/]");
+                            }
+
+                            return action;
+                        };
+
+                        await AnsiConsole.Live(board.Table)
+                            .StartAsync(async liveCtx =>
+                            {
+                                board.Attach(liveCtx);
+
+                                try
+                                {
+                                    jsonGzOutput = await etwProfiler.Run(options);
+                                }
+                                finally
+                                {
+                                    etwProfiler.Dispose();
+                                }
+                            });
+                    }
+                    else if (options.ConsoleMode == UltraProfilerConsoleMode.Silent)
                     {
                         await AnsiConsole.Status()
                             .Spinner(Spinner.Known.Default)
@@ -293,7 +347,11 @@ internal class Program
 
                     if (!string.IsNullOrEmpty(jsonGzOutput))
                     {
-                        AnsiConsole.MarkupLine($"Generated Firefox Profiler JSON file -> [green]{jsonGzOutput}[/] - {ByteSize.FromBytes(new FileInfo(jsonGzOutput).Length)}");
+                        // In Paused mode, each capture is already reported as it is produced via the capture board.
+                        if (!options.Paused)
+                        {
+                            AnsiConsole.MarkupLine($"Generated Firefox Profiler JSON file -> [green]{jsonGzOutput}[/] - {ByteSize.FromBytes(new FileInfo(jsonGzOutput).Length)}");
+                        }
                         AnsiConsole.MarkupLine($"Go to [blue]https://profiler.firefox.com/ [/]");
                     }
                     else
@@ -496,6 +554,160 @@ internal class Program
                 tableColumn.Footer = new Markup(_statusText);
                 Table.ShowFooters = true;
             }
+        }
+    }
+
+    /// <summary>
+    /// Live status display for a Paused profiling session: one row per capture that is still profiling or
+    /// saving, updated as captures start, move to their save phase, finish, or fail - plus a shared log area
+    /// for the profiled program's own stdout/stderr and short prompts. Its methods are called both from the
+    /// live-profiling loop and from background save tasks, so all state is guarded by a single lock.
+    /// </summary>
+    private class CaptureBoard
+    {
+        private enum CapturePhase
+        {
+            Profiling,
+            Saving,
+            Completed,
+            Failed,
+        }
+
+        private sealed class CaptureRow
+        {
+            public required int Index;
+            public CapturePhase Phase;
+            public string StatusText = "";
+        }
+
+        private readonly object _lock = new();
+        private readonly SortedDictionary<int, CaptureRow> _rows = new();
+        private readonly Queue<string> _logLines = new();
+        private const int MaxLogLines = 8;
+        private int _spinnerStep;
+        private LiveDisplayContext? _liveCtx;
+
+        public CaptureBoard()
+        {
+            Table = new Table();
+            Table.AddColumn("Capture");
+            Table.AddColumn("Status");
+        }
+
+        public Table Table { get; }
+
+        public void Attach(LiveDisplayContext liveCtx)
+        {
+            lock (_lock)
+            {
+                _liveCtx = liveCtx;
+                Refresh();
+            }
+        }
+
+        public void CaptureStarted(int index)
+        {
+            lock (_lock)
+            {
+                GetOrAddRow(index).Phase = CapturePhase.Profiling;
+                Refresh();
+            }
+        }
+
+        public void CaptureSaving(int index)
+        {
+            lock (_lock)
+            {
+                var row = GetOrAddRow(index);
+                row.Phase = CapturePhase.Saving;
+                row.StatusText = "Saving...";
+                Refresh();
+            }
+        }
+
+        public void StatusChanged(int index, string message)
+        {
+            lock (_lock)
+            {
+                GetOrAddRow(index).StatusText = message;
+                Refresh();
+            }
+        }
+
+        public void Completed(int index, string outputFile)
+        {
+            lock (_lock)
+            {
+                var row = GetOrAddRow(index);
+                row.Phase = CapturePhase.Completed;
+                row.StatusText = $"Saved -> {outputFile} ({ByteSize.FromBytes(new FileInfo(outputFile).Length)})";
+                Refresh();
+            }
+        }
+
+        public void Failed(int index, Exception ex)
+        {
+            lock (_lock)
+            {
+                var row = GetOrAddRow(index);
+                row.Phase = CapturePhase.Failed;
+                row.StatusText = $"Failed: {ex.Message}";
+                Refresh();
+            }
+        }
+
+        public void LogText(string text)
+        {
+            lock (_lock)
+            {
+                if (_logLines.Count > MaxLogLines)
+                {
+                    _logLines.Dequeue();
+                }
+
+                _logLines.Enqueue(text);
+                Refresh();
+            }
+        }
+
+        private CaptureRow GetOrAddRow(int index)
+        {
+            if (!_rows.TryGetValue(index, out var row))
+            {
+                row = new CaptureRow { Index = index };
+                _rows[index] = row;
+            }
+
+            return row;
+        }
+
+        private void Refresh()
+        {
+            Table.Rows.Clear();
+
+            if (_logLines.Count > 0)
+            {
+                Table.AddRow(new Markup("[grey]Output[/]"), new Rows(_logLines.Select(x => new Markup(x))));
+            }
+
+            var spinnerText = Spinner.Known.Default.Frames[_spinnerStep];
+            _spinnerStep = (_spinnerStep + 1) % Spinner.Known.Default.Frames.Count;
+
+            foreach (var row in _rows.Values)
+            {
+                var phaseText = row.Phase switch
+                {
+                    CapturePhase.Profiling => $"[red]{spinnerText}[/] Profiling",
+                    CapturePhase.Saving => $"[yellow]{spinnerText}[/] Saving",
+                    CapturePhase.Completed => "[green]✓[/] Done",
+                    CapturePhase.Failed => "[red]✗[/] Failed",
+                    _ => "",
+                };
+
+                Table.AddRow(new Markup($"Capture {row.Index}"), new Markup($"{phaseText} - {Markup.Escape(row.StatusText)}"));
+            }
+
+            _liveCtx?.Refresh();
         }
     }
 }

@@ -27,9 +27,11 @@ internal sealed class UltraProfilerEventPipe : UltraProfiler
 
     private protected override ProfilerRunner CreateRunner(UltraProfilerOptions ultraProfilerOptions, List<Process> processList, string baseName, Process? singleProcess)
     {
-        if (processList.Count > 0)
+        if (ultraProfilerOptions.ProgramPath is null && processList.Count > 0)
         {
-            // The sampler library can only be injected at process startup (via DYLD_INSERT_LIBRARIES)
+            // The sampler library can only be injected at process startup (via DYLD_INSERT_LIBRARIES), so
+            // only attaching to a pid ultra did not launch itself is unsupported; processList containing a
+            // process ultra launched (ProgramPath set) is fine.
             throw new PlatformNotSupportedException("Attaching to a running process is not supported on macOS. Use `ultra profile -- <program> [args...]` to launch and profile a program.");
         }
 
@@ -81,6 +83,14 @@ internal sealed class UltraProfilerEventPipe : UltraProfiler
 
             OnEnablingProfiling = async () =>
             {
+                // OnProcessStarted above sets profilerState when this capture launches the process. For a
+                // capture whose process is already running (an earlier capture in this Paused session
+                // launched it), profilerState is still null here, so it's created from singleProcess's pid.
+                if (profilerState is null && singleProcess is not null)
+                {
+                    profilerState = new UltraSamplerProfilerState(baseName, singleProcess.Id, CancellationToken);
+                }
+
                 if (profilerState is not null)
                 {
                     await profilerState.StartProfiling();
