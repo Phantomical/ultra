@@ -1217,11 +1217,12 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
     /// <param name="modules">The loaded modules of the process about to be symbolized.</param>
     /// <returns>The modules for which no PDB could be found.</returns>
     /// <remarks>
-    /// A miss costs a round trip to every remote server on the symbol path, and is not cached on disk, so
-    /// these lookups dominate <see cref="LoadModules"/> on traces containing modules whose symbols are not
-    /// published. A hit leaves the PDB in the shared cache, which every server element on the path checks
-    /// before going out, so the serial pass then resolves it locally. This does I/O only and touches no
-    /// <see cref="TraceLog"/> state.
+    /// A miss costs a round trip to every remote server on the symbol path, so these lookups dominate
+    /// <see cref="LoadModules"/> on traces containing modules whose symbols are not published. A confirmed
+    /// miss is recorded in <see cref="NegativeSymbolCache"/>, so a PDB already known to be unpublished
+    /// skips the round trip entirely until its entry expires. A hit leaves the PDB in the shared cache,
+    /// which every server element on the path checks before going out, so the serial pass then resolves it
+    /// locally. This does I/O only and touches no <see cref="TraceLog"/> state.
     /// </remarks>
     private HashSet<ModuleFileIndex> ResolveModulesWithoutSymbols(List<TraceLoadedModule> modules)
     {
@@ -1328,6 +1329,30 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             return withoutSymbols;
         }
 
+        // Modules already confirmed missing within NegativeSymbolCache.Ttl skip the remote round trip
+        // entirely; only the rest need a server query.
+        var negativeCache = NegativeSymbolCache.GetOrCreate(symbolPath.DefaultSymbolCache());
+        var toQuery = new List<int>(uncached.Count);
+        foreach (var i in uncached)
+        {
+            var moduleFile = pending[i];
+            var key = NegativeSymbolCache.MakeKey(moduleFile.PdbName, moduleFile.PdbSignature, moduleFile.PdbAge);
+            if (negativeCache.IsKnownMissing(key))
+            {
+                withoutSymbols.Add(moduleFile.ModuleFileIndex);
+                ReportProgress("Skipping Known-Missing Symbols", moduleFile);
+            }
+            else
+            {
+                toQuery.Add(i);
+            }
+        }
+
+        if (toQuery.Count == 0)
+        {
+            return withoutSymbols;
+        }
+
         var localElements = symbolPath.Elements.Where(element => !(element.IsSymServer && element.IsRemote)).ToList();
         var servers = new List<ThrottledSymbolServer>(remoteElements.Count);
         try
@@ -1366,22 +1391,27 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                     }
                 }
 
+                if (!found)
+                {
+                    negativeCache.RecordMissing(NegativeSymbolCache.MakeKey(moduleFile.PdbName, moduleFile.PdbSignature, moduleFile.PdbAge));
+                }
+
                 ReportProgress("Querying Symbol Servers", moduleFile);
                 return found;
             }
 
-            var lookups = new Task<bool>[uncached.Count];
-            for (var i = 0; i < uncached.Count; i++)
+            var lookups = new Task<bool>[toQuery.Count];
+            for (var i = 0; i < toQuery.Count; i++)
             {
-                lookups[i] = IsOnAnyServerAsync(pending[uncached[i]]);
+                lookups[i] = IsOnAnyServerAsync(pending[toQuery[i]]);
             }
 
             // Awaited in order, so the result is the same whatever order they complete in.
-            for (var i = 0; i < uncached.Count; i++)
+            for (var i = 0; i < toQuery.Count; i++)
             {
                 if (!lookups[i].GetAwaiter().GetResult())
                 {
-                    withoutSymbols.Add(pending[uncached[i]].ModuleFileIndex);
+                    withoutSymbols.Add(pending[toQuery[i]].ModuleFileIndex);
                 }
             }
         }
@@ -1391,6 +1421,8 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             {
                 server.Dispose();
             }
+
+            negativeCache.Save();
         }
 
         return withoutSymbols;
