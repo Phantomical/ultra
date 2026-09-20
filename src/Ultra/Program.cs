@@ -4,6 +4,7 @@
 using System.Text;
 using ByteSizeLib;
 using Spectre.Console;
+using Spectre.Console.Rendering;
 using Ultra.Core;
 using XenoAtom.CommandLine;
 
@@ -186,7 +187,7 @@ internal class Program
                             return action;
                         };
 
-                        await AnsiConsole.Live(board.Table)
+                        await AnsiConsole.Live(board.Display)
                             .StartAsync(async liveCtx =>
                             {
                                 board.Attach(liveCtx);
@@ -592,9 +593,19 @@ internal class Program
             Table = new Table();
             Table.AddColumn("Capture");
             Table.AddColumn("Status");
+
+            var controls = new Rows(
+                new Markup("[bold]Controls:[/]"),
+                new Markup("  * [bold]SPACE[/] - start profiling"),
+                new Markup("  * [bold]S[/]     - stop profiling and save the profile"),
+                new Markup("  * [bold]Q[/]     - stop, save, and quit"));
+
+            Display = new Rows(controls, Table);
         }
 
         public Table Table { get; }
+
+        public IRenderable Display { get; }
 
         public void Attach(LiveDisplayContext liveCtx)
         {
