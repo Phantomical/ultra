@@ -31,7 +31,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
     private const int ProgressLogEventInterval = 1_000_000;
 
     // Concurrent lookups allowed against any one remote symbol server. Local elements are not throttled.
-    private const int MaxConcurrentLookupsPerSymbolServer = 4;
+    private const int MaxConcurrentLookupsPerSymbolServer = 32;
 
     // Shared across all processes and never cleared (deliberately - ModuleFileIndex values are
     // unique across the whole trace, and re-adding an already-known module is a no-op guarded by
