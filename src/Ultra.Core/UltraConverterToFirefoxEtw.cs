@@ -586,6 +586,9 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                     {
                         context.JitCompilePendingMethodId.Remove(methodLoadUnloadVerbose.MethodID);
 
+                        // The tier is only reported once the code is loaded, not on MethodJittingStarted.
+                        jitCompilePair.Item1.OptimizationTier = methodLoadUnloadVerbose.OptimizationTier;
+
                         markers.StartTime.Add(jitCompilePair.Item2);
                         markers.EndTime.Add(evt.TimeStampRelativeMSec);
                         markers.Category.Add(CategoryJit);

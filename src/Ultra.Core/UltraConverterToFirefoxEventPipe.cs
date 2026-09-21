@@ -808,7 +808,8 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
                 markers.Data.Add(new JitCompileEvent
                 {
                     FullName = jitCompile.FullName,
-                    MethodILSize = jitCompile.MethodILSize
+                    MethodILSize = jitCompile.MethodILSize,
+                    OptimizationTier = jitCompile.OptimizationTier
                 });
                 markers.Length++;
                 break;

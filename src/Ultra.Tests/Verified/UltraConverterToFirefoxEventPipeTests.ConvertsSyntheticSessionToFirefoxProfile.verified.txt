@@ -86,6 +86,16 @@
             "key": "methodILSize",
             "label": "Method IL Size",
             "format": "integer"
+          },
+          {
+            "key": "optimizationTier",
+            "label": "Optimization Tier Id",
+            "format": "integer"
+          },
+          {
+            "key": "optimizationTierName",
+            "label": "Optimization Tier",
+            "format": "string"
           }
         ]
       },
@@ -447,7 +457,9 @@
           {
             "type": "CC",
             "fullName": "MyApp.Worker.DoWork",
-            "methodILSize": 42
+            "methodILSize": 42,
+            "optimizationTier": 4,
+            "optimizationTierName": "OptimizedTier1"
           },
           {
             "type": "GCSlice",

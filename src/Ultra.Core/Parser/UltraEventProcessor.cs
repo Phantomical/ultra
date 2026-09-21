@@ -374,6 +374,8 @@ internal class UltraEventProcessor
         {
             jitCompileMarker.Duration = TimeSpan.FromMilliseconds(method.TimeStampRelativeMSec) -
                                                      jitCompileMarker.StartTime.Value;
+            // The tier is only reported once the code is loaded, not on MethodJittingStarted.
+            jitCompileMarker.OptimizationTier = method.OptimizationTier;
             threadState.Thread.Markers.Add(jitCompileMarker);
             threadState.PendingJitCompiles.Remove(method.MethodID);
         }

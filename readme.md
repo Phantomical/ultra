@@ -20,7 +20,7 @@ Ultra is an advanced profiler for .NET Applications available on Windows and mac
   - `.NET`, `.NET JIT`, `.NET GC`, `.NET CLR`, `Native`, `Kernel`
 - .NET GC Memory track
 - JIT Compile Time Event Markers
-  - See which function is getting compiled
+  - See which function is getting compiled, its IL size and the optimization tier it was compiled at
 - GC Events Markers
   - `GC Allocation Ticks`: Details about allocations. 
   - `GCHeapStats`: Statistics about the GC

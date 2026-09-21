@@ -147,6 +147,7 @@ public class UltraConverterToFirefoxEventPipeTests : VerifyBase
             MethodName = "Worker.DoWork",
             MethodSignature = "()",
             MethodILSize = 42,
+            OptimizationTier = OptimizationTier.OptimizedTier1,
         });
         threadA.Markers.Add(new GCTraceMarker
         {
