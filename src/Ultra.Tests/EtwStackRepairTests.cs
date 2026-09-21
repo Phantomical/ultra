@@ -115,6 +115,85 @@ public class EtwStackRepairTests
     }
 
     [TestMethod]
+    public void GraftedFragmentInheritsGcCategoryFromCommonPrefix()
+    {
+        var thread = new ProfileThread();
+
+        var root = AddFrame(thread, "Root");
+        var dispatch = AddFrame(thread, "Dispatch");
+        var work = AddFrame(thread, "sgen_thread_func", UltraConverterToFirefox.CategoryGc);
+        var common = AddFrame(thread, "sweep_block_for_size", UltraConverterToFirefox.CategoryGc);
+        var previousLeaf = AddFrame(thread, "PreviousLeaf", UltraConverterToFirefox.CategoryGc);
+        var nextLeaf = AddFrame(thread, "NextLeaf", UltraConverterToFirefox.CategoryGc);
+        // A short broken native fragment, e.g. a mis-walked thread-start trampoline sampled while the
+        // thread is actually deep inside GC work - see UltraConverterToFirefoxEtw.GetOrCreateStackEntry.
+        var incompleteLeaf = AddFrame(thread, "RtlUserThreadStart", UltraConverterToFirefox.CategoryNative);
+
+        var rootStack = AddStack(thread, root, null);
+        var dispatchStack = AddStack(thread, dispatch, rootStack);
+        var workStack = AddStack(thread, work, dispatchStack);
+        var commonStack = AddStack(thread, common, workStack);
+        var previousStack = AddStack(thread, previousLeaf, commonStack);
+        var nextStack = AddStack(thread, nextLeaf, commonStack);
+        var incompleteStack = AddStack(thread, incompleteLeaf, null);
+
+        AddSample(thread, previousStack);
+        AddSample(thread, incompleteStack);
+        AddSample(thread, nextStack);
+
+        var repairedCount = UltraConverterToFirefoxEtw.RepairIsolatedIncompleteStacks(thread);
+
+        Assert.AreEqual(1, repairedCount);
+        var repairedStackIndex = thread.Samples.Stack[1]!.Value;
+        CollectionAssert.AreEqual(
+            new[] { "Root", "Dispatch", "sgen_thread_func", "sweep_block_for_size", "RtlUserThreadStart" },
+            GetStackNames(thread, repairedStackIndex).ToArray());
+        Assert.AreEqual(UltraConverterToFirefox.CategoryGc, thread.StackTable.Category[repairedStackIndex]);
+    }
+
+    [TestMethod]
+    public void GraftedKernelFrameWithinFragmentKeepsKernelCategoryUnderGcCommonPrefix()
+    {
+        var thread = new ProfileThread();
+
+        var root = AddFrame(thread, "Root");
+        var dispatch = AddFrame(thread, "Dispatch");
+        var work = AddFrame(thread, "sgen_thread_func", UltraConverterToFirefox.CategoryGc);
+        var common = AddFrame(thread, "sweep_block_for_size", UltraConverterToFirefox.CategoryGc);
+        var previousLeaf = AddFrame(thread, "PreviousLeaf", UltraConverterToFirefox.CategoryGc);
+        var nextLeaf = AddFrame(thread, "NextLeaf", UltraConverterToFirefox.CategoryGc);
+        // A 2-frame broken fragment whose outer frame is Native (so ShouldDiscardIncompleteStackFragment
+        // does not discard it outright) with a syscall as its own leaf: the grafted Native frame should
+        // pick up GC from the common prefix, but the Kernel frame nested under it must not.
+        var incompleteCaller = AddFrame(thread, "NtWaitForSingleObject", UltraConverterToFirefox.CategoryNative);
+        var incompleteLeaf = AddFrame(thread, "ntoskrnl!0xFFFFF801E60B0D7A", UltraConverterToFirefox.CategoryKernel);
+
+        var rootStack = AddStack(thread, root, null);
+        var dispatchStack = AddStack(thread, dispatch, rootStack);
+        var workStack = AddStack(thread, work, dispatchStack);
+        var commonStack = AddStack(thread, common, workStack);
+        var previousStack = AddStack(thread, previousLeaf, commonStack);
+        var nextStack = AddStack(thread, nextLeaf, commonStack);
+        var incompleteCallerStack = AddStack(thread, incompleteCaller, null);
+        var incompleteStack = AddStack(thread, incompleteLeaf, incompleteCallerStack);
+
+        AddSample(thread, previousStack);
+        AddSample(thread, incompleteStack);
+        AddSample(thread, nextStack);
+
+        var repairedCount = UltraConverterToFirefoxEtw.RepairIsolatedIncompleteStacks(thread);
+
+        Assert.AreEqual(1, repairedCount);
+        var repairedStackIndex = thread.Samples.Stack[1]!.Value;
+        CollectionAssert.AreEqual(
+            new[] { "Root", "Dispatch", "sgen_thread_func", "sweep_block_for_size", "NtWaitForSingleObject", "ntoskrnl!0xFFFFF801E60B0D7A" },
+            GetStackNames(thread, repairedStackIndex).ToArray());
+        Assert.AreEqual(UltraConverterToFirefox.CategoryKernel, thread.StackTable.Category[repairedStackIndex]);
+        var repairedCallerStackIndex = thread.StackTable.Prefix[repairedStackIndex]!.Value;
+        Assert.AreEqual(UltraConverterToFirefox.CategoryGc, thread.StackTable.Category[repairedCallerStackIndex]);
+    }
+
+    [TestMethod]
     public void KeepsResolvedNativeFrameWhenRepairingShortStack()
     {
         var thread = new ProfileThread();

@@ -1162,10 +1162,21 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
     private static int GetOrCreateStackEntry(int sourceStackIndex, int prefixStackIndex, FirefoxProfiler.Thread profileThread, Dictionary<StackEntryKey, int> stackEntryMap)
     {
         var stackTable = profileThread.StackTable;
+        var category = stackTable.Category[sourceStackIndex];
+
+        // Grafting (see GraftIncompleteStack) can re-parent a fragment's own frames under a different,
+        // already-converted ancestor than the one ConvertCallStack originally saw - most visibly, a short
+        // broken native fragment grafted under an SGen collection/worker-thread subtree. Re-apply the same
+        // GC-subtree rule ConvertCallStack uses so the graft doesn't leave GC-subtree work looking native.
+        if (category != CategoryKernel && prefixStackIndex >= 0 && stackTable.Category[prefixStackIndex] == CategoryGc)
+        {
+            category = CategoryGc;
+        }
+
         var key = new StackEntryKey(
             stackTable.Frame[sourceStackIndex],
             prefixStackIndex,
-            stackTable.Category[sourceStackIndex],
+            category,
             stackTable.Subcategory[sourceStackIndex]);
 
         if (stackEntryMap.TryGetValue(key, out var existingStackIndex))
