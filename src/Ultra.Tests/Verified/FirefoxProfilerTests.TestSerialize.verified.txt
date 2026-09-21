@@ -59,6 +59,16 @@
             "key": "methodILSize",
             "label": "Method IL Size",
             "format": "integer"
+          },
+          {
+            "key": "optimizationTier",
+            "label": "Optimization Tier Id",
+            "format": "integer"
+          },
+          {
+            "key": "optimizationTierName",
+            "label": "Optimization Tier",
+            "format": "string"
           }
         ]
       }
@@ -125,102 +135,142 @@
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           },
           {
             "type": "CC",
             "fullName": "World",
-            "methodILSize": 100
+            "methodILSize": 100,
+            "optimizationTier": 0,
+            "optimizationTierName": "Unknown"
           }
         ],
         "name": [

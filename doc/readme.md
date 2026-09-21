@@ -111,6 +111,8 @@ The JIT and GC markers are displayed in the timeline. You can see the JIT and GC
 
 You can also see them in the Marker Chart and Marker Table view.
 
+Each JIT compile marker records the compiled method's full name, its IL size and the optimization tier the runtime compiled it at: `optimizationTier` holds the runtime's numeric tier id and `optimizationTierName` its name (e.g. `QuickJitted`, `OptimizedTier1`, `OptimizedTier1OSR`; `Unknown` when the runtime does not report a tier). Both are also available to external tools reading the profile JSON.
+
 ![Profile JIT and GC Markers](profile_markers.png)
 
 ## Ultra Command Line

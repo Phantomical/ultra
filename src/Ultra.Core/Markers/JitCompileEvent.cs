@@ -3,6 +3,7 @@
 // See license.txt file in the project root for full license information.
 
 using System.Text.Json;
+using Microsoft.Diagnostics.Tracing.Parsers.Clr;
 
 namespace Ultra.Core.Markers;
 
@@ -35,12 +36,42 @@ public class JitCompileEvent : FirefoxProfiler.MarkerPayload
     /// </summary>
     public int MethodILSize { get; set; }
 
+    /// <summary>
+    /// Gets or sets the optimization tier the method was compiled at, as reported by the runtime on the
+    /// MethodLoadVerbose event (<see cref="OptimizationTier.Unknown"/> for runtimes that do not report one).
+    /// </summary>
+    public OptimizationTier OptimizationTier { get; set; }
+
     /// <inheritdoc />
     protected internal override void WriteJson(Utf8JsonWriter writer, FirefoxProfiler.MarkerPayload payload, JsonSerializerOptions options)
     {
         writer.WriteString("fullName", FullName);
         writer.WriteNumber("methodILSize", MethodILSize);
+        // Both the runtime's numeric tier id (stable for external analyzers) and its name (for humans).
+        writer.WriteNumber("optimizationTier", (int)OptimizationTier);
+        writer.WriteString("optimizationTierName", GetOptimizationTierName(OptimizationTier));
     }
+
+    /// <summary>
+    /// Names an optimization tier in the profile. Spelled out rather than <c>Enum.ToString()</c> so the
+    /// names written to trace files are pinned here and cannot drift with TraceEvent's enum member names;
+    /// a tier this version does not know is written as its numeric id.
+    /// </summary>
+    private static string GetOptimizationTierName(OptimizationTier tier)
+        => tier switch
+        {
+            OptimizationTier.Unknown => "Unknown",
+            OptimizationTier.MinOptJitted => "MinOptJitted",
+            OptimizationTier.Optimized => "Optimized",
+            OptimizationTier.QuickJitted => "QuickJitted",
+            OptimizationTier.OptimizedTier1 => "OptimizedTier1",
+            OptimizationTier.OptimizedTier1OSR => "OptimizedTier1OSR",
+            OptimizationTier.QuickJittedInstrumented => "QuickJittedInstrumented",
+            OptimizationTier.OptimizedTier1Instrumented => "OptimizedTier1Instrumented",
+            OptimizationTier.ReadyToRun => "ReadyToRun",
+            OptimizationTier.PreJIT => "PreJIT",
+            _ => ((int)tier).ToString(System.Globalization.CultureInfo.InvariantCulture),
+        };
 
     /// <summary>
     /// Gets the schema for the JIT compile event marker.
@@ -74,6 +105,18 @@ public class JitCompileEvent : FirefoxProfiler.MarkerPayload
                         Format = FirefoxProfiler.MarkerFormatType.Integer,
                         Key = "methodILSize",
                         Label = "Method IL Size",
+                    },
+                    new FirefoxProfiler.MarkerDataItem()
+                    {
+                        Format = FirefoxProfiler.MarkerFormatType.Integer,
+                        Key = "optimizationTier",
+                        Label = "Optimization Tier Id",
+                    },
+                    new FirefoxProfiler.MarkerDataItem()
+                    {
+                        Format = FirefoxProfiler.MarkerFormatType.String,
+                        Key = "optimizationTierName",
+                        Label = "Optimization Tier",
                     },
             },
         };
