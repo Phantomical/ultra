@@ -149,6 +149,14 @@ public class EtwStackRepairTests
             new[] { "Root", "Dispatch", "sgen_thread_func", "sweep_block_for_size", "RtlUserThreadStart" },
             GetStackNames(thread, repairedStackIndex).ToArray());
         Assert.AreEqual(UltraConverterToFirefox.CategoryGc, thread.StackTable.Category[repairedStackIndex]);
+
+        // The profiler only honors the frame's category, so the graft must use a GC-categorized clone of the
+        // fragment's frame (same func, so the call tree still merges it) rather than the shared Native one.
+        var repairedFrameIndex = thread.StackTable.Frame[repairedStackIndex];
+        Assert.AreNotEqual(incompleteLeaf, repairedFrameIndex);
+        Assert.AreEqual(UltraConverterToFirefox.CategoryGc, thread.FrameTable.Category[repairedFrameIndex]);
+        Assert.AreEqual(UltraConverterToFirefox.CategoryNative, thread.FrameTable.Category[incompleteLeaf]);
+        Assert.AreEqual(thread.FrameTable.Func[incompleteLeaf], thread.FrameTable.Func[repairedFrameIndex]);
     }
 
     [TestMethod]
@@ -189,8 +197,13 @@ public class EtwStackRepairTests
             new[] { "Root", "Dispatch", "sgen_thread_func", "sweep_block_for_size", "NtWaitForSingleObject", "ntoskrnl!0xFFFFF801E60B0D7A" },
             GetStackNames(thread, repairedStackIndex).ToArray());
         Assert.AreEqual(UltraConverterToFirefox.CategoryKernel, thread.StackTable.Category[repairedStackIndex]);
+        Assert.AreEqual(incompleteLeaf, thread.StackTable.Frame[repairedStackIndex]);
         var repairedCallerStackIndex = thread.StackTable.Prefix[repairedStackIndex]!.Value;
         Assert.AreEqual(UltraConverterToFirefox.CategoryGc, thread.StackTable.Category[repairedCallerStackIndex]);
+        var repairedCallerFrameIndex = thread.StackTable.Frame[repairedCallerStackIndex];
+        Assert.AreNotEqual(incompleteCaller, repairedCallerFrameIndex);
+        Assert.AreEqual(UltraConverterToFirefox.CategoryGc, thread.FrameTable.Category[repairedCallerFrameIndex]);
+        Assert.AreEqual(thread.FrameTable.Func[incompleteCaller], thread.FrameTable.Func[repairedCallerFrameIndex]);
     }
 
     [TestMethod]

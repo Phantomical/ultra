@@ -48,11 +48,13 @@ public class UltraConverterToFirefoxEventPipeGcCategoryTests
 
     /// <summary>
     /// Builds a module containing <paramref name="rootFunctionName"/> plus an unrelated helper symbol, then
-    /// samples the helper twice: once called from under <paramref name="rootFunctionName"/> and once on its
-    /// own. Only the first call path should be categorized as GC - confirming the propagation is scoped to
-    /// the call stack it actually occurs on, not to every occurrence of that code address (frames are cached
-    /// and shared across call paths - see <c>ConvertFrame</c> - so this also guards against a change that
-    /// mutates the shared, cached frame category instead of the per-call-stack-node one).
+    /// samples the helper three times: twice called from under <paramref name="rootFunctionName"/> (directly,
+    /// and recursively) and once on its own. Only the first two call paths should be categorized as GC -
+    /// confirming the propagation is scoped to the call stack it actually occurs on, not to every occurrence
+    /// of that code address. The Firefox Profiler derives a stack's category from its frame alone, and frames
+    /// are cached per code address (see <c>ConvertFrame</c>), so the GC call paths must get a GC-categorized
+    /// clone of the helper's frame (shared between them, and sharing the plain frame's func) rather than
+    /// either a category written only on the stack node or a mutation of the shared, cached frame.
     /// </summary>
     private static void AssertDescendantOfGcRootIsCategorizedAsGc(string rootFunctionName)
     {
@@ -97,10 +99,12 @@ public class UltraConverterToFirefoxEventPipeGcCategoryTests
 
             // InsertCallStack takes the leaf frame first and the outermost/root frame last.
             var stackUnderRoot = process.CallStacks.InsertCallStack([helperAddr, rootAddr]);
+            var stackUnderRootRecursive = process.CallStacks.InsertCallStack([helperAddr, helperAddr, rootAddr]);
             var stackWithoutRoot = process.CallStacks.InsertCallStack([helperAddr]);
 
             thread.Samples.Add(new UTraceSample(stackUnderRoot, UTimeSpan.FromMilliseconds(1), UTimeSpan.FromMilliseconds(1)));
-            thread.Samples.Add(new UTraceSample(stackWithoutRoot, UTimeSpan.FromMilliseconds(2), UTimeSpan.FromMilliseconds(1)));
+            thread.Samples.Add(new UTraceSample(stackUnderRootRecursive, UTimeSpan.FromMilliseconds(2), UTimeSpan.FromMilliseconds(1)));
+            thread.Samples.Add(new UTraceSample(stackWithoutRoot, UTimeSpan.FromMilliseconds(3), UTimeSpan.FromMilliseconds(1)));
 
             var options = new UltraProfilerOptions
             {
@@ -113,10 +117,24 @@ public class UltraConverterToFirefoxEventPipeGcCategoryTests
 
             var profileThread = profile.Threads.Single();
             var underRootStackIndex = profileThread.Samples.Stack[0]!.Value;
-            var withoutRootStackIndex = profileThread.Samples.Stack[1]!.Value;
+            var underRootRecursiveStackIndex = profileThread.Samples.Stack[1]!.Value;
+            var withoutRootStackIndex = profileThread.Samples.Stack[2]!.Value;
 
             Assert.AreEqual(UltraConverterToFirefox.CategoryGc, profileThread.StackTable.Category[underRootStackIndex]);
+            Assert.AreEqual(UltraConverterToFirefox.CategoryGc, profileThread.StackTable.Category[underRootRecursiveStackIndex]);
             Assert.AreEqual(UltraConverterToFirefox.CategoryNative, profileThread.StackTable.Category[withoutRootStackIndex]);
+
+            var frameTable = profileThread.FrameTable;
+            var underRootFrameIndex = profileThread.StackTable.Frame[underRootStackIndex];
+            var underRootRecursiveFrameIndex = profileThread.StackTable.Frame[underRootRecursiveStackIndex];
+            var withoutRootFrameIndex = profileThread.StackTable.Frame[withoutRootStackIndex];
+
+            Assert.AreEqual(UltraConverterToFirefox.CategoryGc, frameTable.Category[underRootFrameIndex]);
+            Assert.AreEqual(UltraConverterToFirefox.CategoryNative, frameTable.Category[withoutRootFrameIndex]);
+            Assert.AreNotEqual(withoutRootFrameIndex, underRootFrameIndex);
+            Assert.AreEqual(underRootFrameIndex, underRootRecursiveFrameIndex);
+            Assert.AreEqual(frameTable.Func[withoutRootFrameIndex], frameTable.Func[underRootFrameIndex]);
+            Assert.AreEqual(frameTable.Address[withoutRootFrameIndex], frameTable.Address[underRootFrameIndex]);
         }
         finally
         {

@@ -519,12 +519,15 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
         // Propagate GC categorization down an SGen collection/worker-thread subtree, so callees that don't
         // carry a `sgen_`-prefixed symbol of their own (e.g. a libc helper called while collecting) are still
         // attributed to GC. Kernel frames are excluded: a syscall made from GC code is still kernel work, not
-        // GC work. This category is per call-stack node, not per frame - see ConvertFrame's cache comment.
+        // GC work. Frames are cached per code address (see ConvertFrame) and the profiler only honors the
+        // frame's category, so such a callee gets a GC-categorized frame of its own - see GetOrCreateGcSubtreeFrame.
         var parentInGcSubtree = firefoxParentCallStackIndex >= 0 && context.StackInGcSubtree[firefoxParentCallStackIndex];
         var inGcSubtree = parentInGcSubtree || IsSgenGcRootFunction(frameTableIndex, context);
-        if (inGcSubtree && category != CategoryKernel)
+        if (inGcSubtree && category != CategoryKernel && category != CategoryGc)
         {
+            frameTableIndex = GetOrCreateGcSubtreeFrame(context.ProfileThread.FrameTable, frameTableIndex, context.MapFrameToGcSubtreeFrame);
             category = CategoryGc;
+            subCategory = 0;
         }
 
         stackTable.Frame.Add(frameTableIndex);
@@ -1148,5 +1151,11 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
         /// GC even where a callee's own symbol (e.g. a libc helper) does not carry a <c>sgen_</c> name.
         /// </summary>
         public List<bool> StackInGcSubtree { get; } = new();
+
+        /// <summary>
+        /// Maps a frame table index to the index of its GC-categorized clone, used for the frames of stack
+        /// nodes inside an SGen subtree - see <see cref="UltraConverterToFirefox.GetOrCreateGcSubtreeFrame"/>.
+        /// </summary>
+        public Dictionary<int, int> MapFrameToGcSubtreeFrame { get; } = new();
     }
 }
