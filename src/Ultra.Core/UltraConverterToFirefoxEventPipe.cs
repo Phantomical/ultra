@@ -853,6 +853,17 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
                 markers.Length++;
                 break;
 
+            case GCConcurrentTraceMarker:
+                markers.StartTime.Add(startTimeInMs);
+                markers.EndTime.Add(endTimeInMs);
+                markers.Category.Add(CategoryGc);
+                markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
+                markers.ThreadId.Add(context.ProfileThreadIndex);
+                markers.Name.Add(GetOrCreateString("GC Concurrent", context));
+                markers.Data.Add(new GCConcurrentEvent());
+                markers.Length++;
+                break;
+
             case GCAllocationTickTraceMarker allocationTick:
                 markers.StartTime.Add(startTimeInMs);
                 markers.EndTime.Add(startTimeInMs);
@@ -1039,6 +1050,7 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
                     GCAllocationTickEvent.Schema(),
                     GCSuspendExecutionEngineEvent.Schema(),
                     GCRestartExecutionEngineEvent.Schema(),
+                    GCConcurrentEvent.Schema(),
                 }
             }
         };
