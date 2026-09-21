@@ -12,16 +12,27 @@ namespace Ultra.Core.Markers;
 public class GCEvent : FirefoxProfiler.MarkerPayload
 {
     /// <summary>
-    /// The type identifier for the GC event.
+    /// The type identifier used for a collection at <see cref="Depth"/> above the nursery generation.
+    /// Reuses Firefox Profiler's built-in "GCMajor" style: a square-cornered marker on its own timeline row.
     /// </summary>
-    public const string TypeId = "GCMajor"; // Use a predefined type to have a different marker style in the timeline
+    public const string TypeIdMajor = "GCMajor"; // Use a predefined type to have a different marker style in the timeline
+
+    /// <summary>
+    /// The type identifier used for a nursery collection (<see cref="Depth"/> == 0). Firefox Profiler has no
+    /// built-in "minor GC" style left to reuse for this - its own "GCMinor" name is already used by
+    /// <see cref="GCAllocationTickEvent"/> in this converter - so this reuses "GCSlice" instead, which still
+    /// renders as a rounded, lower-row marker visually distinct from <see cref="TypeIdMajor"/>'s square,
+    /// top-row one.
+    /// </summary>
+    public const string TypeIdMinor = "GCSlice"; // Use a predefined type to have a different marker style in the timeline
 
     /// <summary>
     /// Initializes a new instance of the <see cref="GCEvent"/> class.
     /// </summary>
-    public GCEvent()
+    /// <param name="depth">The GC generation depth (0 = nursery), used to pick the marker's built-in style.</param>
+    public GCEvent(int depth)
     {
-        Type = TypeId;
+        Type = depth == 0 ? TypeIdMinor : TypeIdMajor;
     }
 
     /// <summary>
@@ -52,22 +63,31 @@ public class GCEvent : FirefoxProfiler.MarkerPayload
         writer.WriteNumber("depth", Depth);
         writer.WriteString("gcType", GCType);
 
-        // This is a dummy field to make it compatible with firefox-profiler - ugly hack, but there is no way to use our own marker styles, so we are reusing GCMajor here.
-        // But we need to workaround the following code that expect some fields to be present:
+        // This is a dummy field to make it compatible with firefox-profiler - ugly hack, but there is no way to use our own marker styles, so we are reusing GCMajor/GCSlice here.
+        // But we need to workaround the following code that expects some fields to be present (and, for GCSlice, dereferences data.timings.* without a null check at all):
         // https://github.com/xoofx/firefox-profiler/blob/56ac64c17b79b964c1263e8022dd2db3399f230f/src/components/tooltip/GCMarker.js#L218-L224
+        // https://github.com/xoofx/firefox-profiler/blob/56ac64c17b79b964c1263e8022dd2db3399f230f/src/components/tooltip/GCMarker.js#L282-L302
         writer.WriteStartObject("timings");
         writer.WriteString("status", string.Empty);
         writer.WriteEndObject();
     }
 
     /// <summary>
-    /// Returns the schema for the GC event marker.
+    /// Returns the schema for a major (non-nursery) GC event marker.
     /// </summary>
     /// <returns>The schema for the GC event marker.</returns>
-    public static FirefoxProfiler.MarkerSchema Schema()
+    public static FirefoxProfiler.MarkerSchema SchemaMajor() => Schema(TypeIdMajor);
+
+    /// <summary>
+    /// Returns the schema for a minor (nursery) GC event marker.
+    /// </summary>
+    /// <returns>The schema for the GC event marker.</returns>
+    public static FirefoxProfiler.MarkerSchema SchemaMinor() => Schema(TypeIdMinor);
+
+    private static FirefoxProfiler.MarkerSchema Schema(string typeId)
         => new()
         {
-            Name = TypeId,
+            Name = typeId,
             ChartLabel = "GC: {marker.data.reason}, Type: {marker.data.gcType}, Count: {marker.data.count}",
             TableLabel = "GC: {marker.data.reason}, Type: {marker.data.gcType}, Count: {marker.data.count}",
             Display =

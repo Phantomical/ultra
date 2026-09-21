@@ -817,7 +817,7 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
                 markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
                 markers.ThreadId.Add(context.ProfileThreadIndex);
                 markers.Name.Add(GetOrCreateString("GC Event", context));
-                markers.Data.Add(new GCEvent
+                markers.Data.Add(new GCEvent(gc.Depth)
                 {
                     Reason = gc.Reason ?? string.Empty,
                     Count = gc.Count,
@@ -1033,7 +1033,8 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
                 MarkerSchema =
                 {
                     JitCompileEvent.Schema(),
-                    GCEvent.Schema(),
+                    GCEvent.SchemaMajor(),
+                    GCEvent.SchemaMinor(),
                     GCHeapStatsEvent.Schema(),
                     GCAllocationTickEvent.Schema(),
                     GCSuspendExecutionEngineEvent.Schema(),

@@ -122,6 +122,38 @@
         ]
       },
       {
+        "name": "GCSlice",
+        "tableLabel": "GC: {marker.data.reason}, Type: {marker.data.gcType}, Count: {marker.data.count}",
+        "chartLabel": "GC: {marker.data.reason}, Type: {marker.data.gcType}, Count: {marker.data.count}",
+        "display": [
+          "timeline-memory",
+          "marker-chart",
+          "marker-table"
+        ],
+        "data": [
+          {
+            "key": "reason",
+            "label": "Reason",
+            "format": "string"
+          },
+          {
+            "key": "count",
+            "label": "Count",
+            "format": "integer"
+          },
+          {
+            "key": "depth",
+            "label": "Depth",
+            "format": "integer"
+          },
+          {
+            "key": "gcType",
+            "label": "GC Type",
+            "format": "string"
+          }
+        ]
+      },
+      {
         "name": "dotnet.gc.heap_stats",
         "tableLabel": "GC Heap Stats: {marker.data.totalHeapSize}, Promoted: {marker.data.totalPromoted}",
         "chartLabel": "GC Heap Stats: {marker.data.totalHeapSize}, Promoted: {marker.data.totalPromoted}",
@@ -407,7 +439,7 @@
             "methodILSize": 42
           },
           {
-            "type": "GCMajor",
+            "type": "GCSlice",
             "reason": "AllocSmall",
             "count": 1,
             "depth": 0,

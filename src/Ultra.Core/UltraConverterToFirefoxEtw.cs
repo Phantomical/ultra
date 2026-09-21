@@ -652,7 +652,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                 {
                     if (evt is GCStartTraceData gcStart)
                     {
-                        var gcEvent = new GCEvent
+                        var gcEvent = new GCEvent(gcStart.Depth)
                         {
                             Reason = gcStart.Reason.ToString(),
                             Count = gcStart.Count,
@@ -1985,7 +1985,8 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                 MarkerSchema =
                 {
                     JitCompileEvent.Schema(),
-                    GCEvent.Schema(),
+                    GCEvent.SchemaMajor(),
+                    GCEvent.SchemaMinor(),
                     GCHeapStatsEvent.Schema(),
                     GCAllocationTickEvent.Schema(),
                     GCSuspendExecutionEngineEvent.Schema(),
