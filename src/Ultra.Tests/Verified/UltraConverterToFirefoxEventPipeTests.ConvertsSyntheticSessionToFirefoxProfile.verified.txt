@@ -321,6 +321,17 @@
           "marker-table"
         ],
         "data": []
+      },
+      {
+        "name": "dotnet.gc.concurrent",
+        "tableLabel": "GC Concurrent",
+        "chartLabel": "GC Concurrent",
+        "display": [
+          "timeline-overview",
+          "marker-chart",
+          "marker-table"
+        ],
+        "data": []
       }
     ],
     "sampleUnits": {

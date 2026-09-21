@@ -154,6 +154,14 @@ internal class UltraEventProcessor
         var gcRestartEEMarker = threadState.PendingGCRestartExecutionEngineTraceMarkers.Pop();
         gcRestartEEMarker.Duration = TimeSpan.FromMilliseconds(gcRestartEE.TimeStampRelativeMSec) - gcRestartEEMarker.StartTime.Value;
         threadState.Thread.Markers.Add(gcRestartEEMarker);
+
+        // This closes the first Suspend/Restart pair since the watched BackgroundGC GCStart: the world has
+        // resumed and the concurrent phase begins now, ending at the second pair's GCSuspendEEStart.
+        if (threadState.ConcurrentGCWatch == ConcurrentGCWatchState.WaitingForFirstRestart)
+        {
+            threadState.ConcurrentGCWatch = ConcurrentGCWatchState.WaitingForSecondSuspend;
+            threadState.PendingConcurrentGCStartTimeInMs = gcRestartEE.TimeStampRelativeMSec;
+        }
     }
 
     private void ClrOnGCSuspendEEStart(GCSuspendEETraceData gcSuspendEE)
@@ -165,7 +173,20 @@ internal class UltraEventProcessor
             Count = gcSuspendEE.Count
         };
 
-        GetThreadSamplingState(gcSuspendEE, (ulong)gcSuspendEE.ThreadID).PendingGCSuspendExecutionEngineTraceMarkers.Add(gcSuspendEEMarker);
+        var threadState = GetThreadSamplingState(gcSuspendEE, (ulong)gcSuspendEE.ThreadID);
+        threadState.PendingGCSuspendExecutionEngineTraceMarkers.Add(gcSuspendEEMarker);
+
+        // This begins the second Suspend/Restart pair since the watched BackgroundGC GCStart: the world is
+        // about to stop for the final pause, so the concurrent phase ends here.
+        if (threadState.ConcurrentGCWatch == ConcurrentGCWatchState.WaitingForSecondSuspend)
+        {
+            threadState.Thread.Markers.Add(new GCConcurrentTraceMarker
+            {
+                StartTime = UTimeSpan.FromMilliseconds(threadState.PendingConcurrentGCStartTimeInMs),
+                Duration = TimeSpan.FromMilliseconds(gcSuspendEE.TimeStampRelativeMSec - threadState.PendingConcurrentGCStartTimeInMs)
+            });
+            threadState.ConcurrentGCWatch = ConcurrentGCWatchState.NotWatching;
+        }
     }
 
     private void ClrOnGCSuspendEEStop(GCNoUserDataTraceData obj)
@@ -184,6 +205,11 @@ internal class UltraEventProcessor
         var gcEvent = threadState.PendingGCEvents.Pop();
         gcEvent.Duration = TimeSpan.FromMilliseconds(obj.TimeStampRelativeMSec) - gcEvent.StartTime.Value;
         threadState.Thread.Markers.Add(gcEvent);
+
+        // A well-formed background GC always closes its second Suspend/Restart pair before GCEnd, so this
+        // only resets anything for a malformed/incomplete trace - without it, a stale watch would misattribute
+        // the next unrelated Suspend/Restart pair on this thread to a synthesized concurrent span.
+        threadState.ConcurrentGCWatch = ConcurrentGCWatchState.NotWatching;
     }
 
     private void ClrOnGCStart(GCStartTraceData gcStart)
@@ -196,7 +222,17 @@ internal class UltraEventProcessor
             Depth = gcStart.Depth,
             GCType = gcStart.Type.ToString()
         };
-        GetThreadSamplingState(gcStart, (ulong)gcStart.ThreadID).PendingGCEvents.Push(gcEvent);
+
+        var threadState = GetThreadSamplingState(gcStart, (ulong)gcStart.ThreadID);
+        threadState.PendingGCEvents.Push(gcEvent);
+
+        // Start watching for the two nested Suspend/Restart pairs a background GC always produces - see
+        // ConcurrentGCWatchState. Guarded on NotWatching so a nested/re-entrant BackgroundGC GCStart (not
+        // expected in practice) can't clobber a watch already in progress.
+        if (gcStart.Type == GCType.BackgroundGC && gcStart.Depth == 1 && threadState.ConcurrentGCWatch == ConcurrentGCWatchState.NotWatching)
+        {
+            threadState.ConcurrentGCWatch = ConcurrentGCWatchState.WaitingForFirstRestart;
+        }
     }
 
     private void ClrOnGCAllocationTick(GCAllocationTickTraceData allocationTick)
@@ -477,6 +513,24 @@ internal class UltraEventProcessor
         }
     }
 
+    /// <summary>
+    /// Tracks progress, per thread, toward synthesizing a <see cref="GCConcurrentTraceMarker"/> for a pending
+    /// BackgroundGC GCStart (Depth == 1). A background GC always nests exactly two stop-the-world pauses
+    /// inside one GCStart/GCEnd - a short initial pause, the concurrent phase, then a short final pause - so
+    /// the concurrent span runs from the first pair's GCRestartEEStop to the second pair's GCSuspendEEStart.
+    /// </summary>
+    private enum ConcurrentGCWatchState
+    {
+        /// <summary>No BackgroundGC GCStart is pending, or its concurrent span has already been emitted.</summary>
+        NotWatching,
+
+        /// <summary>A BackgroundGC GCStart is pending; waiting for the first Suspend/Restart pair to close.</summary>
+        WaitingForFirstRestart,
+
+        /// <summary>The first pair has closed; waiting for the second pair's GCSuspendEEStart to close the span.</summary>
+        WaitingForSecondSuspend,
+    }
+
     private class ThreadSamplerState
     {
         private readonly UCodeAddressIndex[] _previousFrame = new UCodeAddressIndex[63]; // 64 - 1 as in the sampler, the first index is used for the count
@@ -490,6 +544,19 @@ internal class UltraEventProcessor
         public UnsafeList<GCSuspendExecutionEngineTraceMarker> PendingGCSuspendExecutionEngineTraceMarkers = new();
 
         public UnsafeList<GCRestartExecutionEngineTraceMarker> PendingGCRestartExecutionEngineTraceMarkers = new();
+
+        /// <summary>
+        /// Progress toward synthesizing a <see cref="GCConcurrentTraceMarker"/> for a pending BackgroundGC
+        /// GCStart. See <see cref="ConcurrentGCWatchState"/>.
+        /// </summary>
+        public ConcurrentGCWatchState ConcurrentGCWatch = ConcurrentGCWatchState.NotWatching;
+
+        /// <summary>
+        /// The timestamp of the first Suspend/Restart pair's GCRestartEEStop since the watched BackgroundGC
+        /// GCStart - the start of the concurrent span. Only meaningful while <see cref="ConcurrentGCWatch"/>
+        /// is <see cref="ConcurrentGCWatchState.WaitingForSecondSuspend"/>.
+        /// </summary>
+        public double PendingConcurrentGCStartTimeInMs;
 
         public UnsafeDictionary<long, JitCompileTraceMarker> PendingJitCompiles = new();
 
