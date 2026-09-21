@@ -103,4 +103,45 @@ public abstract class UltraConverterToFirefox : IDisposable
     }
 
     private protected abstract void ConvertImpl(List<int> processIds);
+
+    /// <summary>
+    /// Returns a frame identical to <paramref name="frameTableIndex"/> but categorized as
+    /// <see cref="CategoryGc"/>, creating it the first time it is asked for.
+    /// </summary>
+    /// <param name="frameTable">The frame table of the thread being converted.</param>
+    /// <param name="frameTableIndex">The frame to clone; must not be a kernel or GC frame already.</param>
+    /// <param name="gcSubtreeFrames">Maps a frame index to its GC-categorized clone.</param>
+    /// <returns>The index of the GC-categorized clone.</returns>
+    /// <remarks>
+    /// The Firefox Profiler derives a stack node's category from its frame alone - its processed-profile
+    /// upgrader (version 53) deletes <c>stackTable.category</c> on load - so a category written on the stack
+    /// node is never displayed. A callee that should be attributed to the collector only because of who called
+    /// it (a libc helper, Mono's lock-free allocator) shares its code address, and so its frame, with call paths
+    /// outside the collector; it needs a GC-categorized frame of its own. The clone keeps the same func, so the
+    /// call tree still merges both variants into a single node.
+    /// </remarks>
+    private protected static int GetOrCreateGcSubtreeFrame(FirefoxProfiler.FrameTable frameTable, int frameTableIndex, Dictionary<int, int> gcSubtreeFrames)
+    {
+        if (gcSubtreeFrames.TryGetValue(frameTableIndex, out var gcFrameTableIndex))
+        {
+            return gcFrameTableIndex;
+        }
+
+        gcFrameTableIndex = frameTable.Length;
+        gcSubtreeFrames.Add(frameTableIndex, gcFrameTableIndex);
+
+        frameTable.Address.Add(frameTable.Address[frameTableIndex]);
+        frameTable.InlineDepth.Add(frameTable.InlineDepth[frameTableIndex]);
+        frameTable.Category.Add(CategoryGc);
+        frameTable.Subcategory.Add(0);
+        frameTable.Func.Add(frameTable.Func[frameTableIndex]);
+        frameTable.NativeSymbol.Add(frameTable.NativeSymbol[frameTableIndex]);
+        frameTable.InnerWindowID.Add(frameTable.InnerWindowID[frameTableIndex]);
+        frameTable.Implementation.Add(frameTable.Implementation[frameTableIndex]);
+        frameTable.Line.Add(frameTable.Line[frameTableIndex]);
+        frameTable.Column.Add(frameTable.Column[frameTableIndex]);
+        frameTable.Length++;
+
+        return gcFrameTableIndex;
+    }
 }

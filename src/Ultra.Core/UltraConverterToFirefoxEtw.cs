@@ -277,6 +277,12 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         /// </summary>
         public List<bool> StackInGcSubtree { get; } = new();
 
+        /// <summary>
+        /// Maps a frame table index to the index of its GC-categorized clone, used for the frames of stack
+        /// nodes inside an SGen subtree - see <see cref="UltraConverterToFirefox.GetOrCreateGcSubtreeFrame"/>.
+        /// </summary>
+        public Dictionary<int, int> MapFrameToGcSubtreeFrame { get; } = new();
+
         public Dictionary<CodeAddressIndex, int> MapCodeAddressIndexToFirefox { get; } = new();
         public Dictionary<CodeAddressIndex, int> MapCodeAddressIndexToMethodIndexFirefox { get; } = new();
         public Dictionary<MethodIndex, int> MapMethodIndexToFirefox { get; } = new();
@@ -322,6 +328,8 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             MapCallStackIndexToFirefox.TrimExcess();
             StackInGcSubtree.Clear();
             StackInGcSubtree.TrimExcess();
+            MapFrameToGcSubtreeFrame.Clear();
+            MapFrameToGcSubtreeFrame.TrimExcess();
             MapCodeAddressIndexToFirefox.Clear();
             MapCodeAddressIndexToFirefox.TrimExcess();
             MapCodeAddressIndexToMethodIndexFirefox.Clear();
@@ -808,7 +816,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             // and visibility/selection bookkeeping below).
             Options.LogProgress?.Invoke($"Finalizing Thread: {profileThread.Name}");
 
-            RepairIsolatedIncompleteStacks(profileThread);
+            RepairIsolatedIncompleteStacks(profileThread, context.MapFrameToGcSubtreeFrame);
 
             // profileThread is now fully built (nothing below touches this thread's interning
             // dictionaries again), so release their backing storage now rather than letting every
@@ -871,8 +879,9 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
     // partial stacks onto the surrounding common prefix, and discard fragments that only contain
     // an unresolved/kernel root, so Firefox Profiler does not render a single broken sample as a
     // full call-stack change.
-    internal static int RepairIsolatedIncompleteStacks(FirefoxProfiler.Thread profileThread)
+    internal static int RepairIsolatedIncompleteStacks(FirefoxProfiler.Thread profileThread, Dictionary<int, int>? gcSubtreeFrames = null)
     {
+        gcSubtreeFrames ??= new Dictionary<int, int>();
         var samples = profileThread.Samples;
         var sampleStacks = samples.Stack;
         var sampleCount = Math.Min(samples.Length, sampleStacks.Count);
@@ -977,7 +986,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                 else
                 {
                     stackEntryMap ??= CreateStackEntryMap(profileThread);
-                    repairedStackIndex = GraftIncompleteStack(stackIndex, commonPrefix.StackIndex, commonPrefixNodes, profileThread, stackEntryMap);
+                    repairedStackIndex = GraftIncompleteStack(stackIndex, commonPrefix.StackIndex, commonPrefixNodes, profileThread, stackEntryMap, gcSubtreeFrames);
                 }
 
                 if (repairedStackIndex != stackIndex)
@@ -1103,14 +1112,14 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         return new StackPrefix(commonStackIndex, commonDepth);
     }
 
-    private static int GraftIncompleteStack(int incompleteStackIndex, int prefixStackIndex, List<int> prefixStackNodes, FirefoxProfiler.Thread profileThread, Dictionary<StackEntryKey, int> stackEntryMap)
+    private static int GraftIncompleteStack(int incompleteStackIndex, int prefixStackIndex, List<int> prefixStackNodes, FirefoxProfiler.Thread profileThread, Dictionary<StackEntryKey, int> stackEntryMap, Dictionary<int, int> gcSubtreeFrames)
     {
         var incompleteStackNodes = GetStackNodes(incompleteStackIndex, profileThread);
         var overlap = FindPrefixOverlap(prefixStackNodes, incompleteStackNodes, profileThread);
         var currentPrefixStackIndex = prefixStackIndex;
         for (var i = overlap; i < incompleteStackNodes.Count; i++)
         {
-            currentPrefixStackIndex = GetOrCreateStackEntry(incompleteStackNodes[i], currentPrefixStackIndex, profileThread, stackEntryMap);
+            currentPrefixStackIndex = GetOrCreateStackEntry(incompleteStackNodes[i], currentPrefixStackIndex, profileThread, stackEntryMap, gcSubtreeFrames);
         }
 
         return currentPrefixStackIndex;
@@ -1159,25 +1168,25 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         return true;
     }
 
-    private static int GetOrCreateStackEntry(int sourceStackIndex, int prefixStackIndex, FirefoxProfiler.Thread profileThread, Dictionary<StackEntryKey, int> stackEntryMap)
+    private static int GetOrCreateStackEntry(int sourceStackIndex, int prefixStackIndex, FirefoxProfiler.Thread profileThread, Dictionary<StackEntryKey, int> stackEntryMap, Dictionary<int, int> gcSubtreeFrames)
     {
         var stackTable = profileThread.StackTable;
+        var frame = stackTable.Frame[sourceStackIndex];
         var category = stackTable.Category[sourceStackIndex];
+        var subcategory = stackTable.Subcategory[sourceStackIndex];
 
         // Grafting (see GraftIncompleteStack) can re-parent a fragment's own frames under a different,
         // already-converted ancestor than the one ConvertCallStack originally saw - most visibly, a short
         // broken native fragment grafted under an SGen collection/worker-thread subtree. Re-apply the same
         // GC-subtree rule ConvertCallStack uses so the graft doesn't leave GC-subtree work looking native.
-        if (category != CategoryKernel && prefixStackIndex >= 0 && stackTable.Category[prefixStackIndex] == CategoryGc)
+        if (category != CategoryKernel && category != CategoryGc && prefixStackIndex >= 0 && stackTable.Category[prefixStackIndex] == CategoryGc)
         {
+            frame = GetOrCreateGcSubtreeFrame(profileThread.FrameTable, frame, gcSubtreeFrames);
             category = CategoryGc;
+            subcategory = 0;
         }
 
-        var key = new StackEntryKey(
-            stackTable.Frame[sourceStackIndex],
-            prefixStackIndex,
-            category,
-            stackTable.Subcategory[sourceStackIndex]);
+        var key = new StackEntryKey(frame, prefixStackIndex, category, subcategory);
 
         if (stackEntryMap.TryGetValue(key, out var existingStackIndex))
         {
@@ -1634,12 +1643,15 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         // Propagate GC categorization down an SGen collection/worker-thread subtree, so callees that don't
         // carry a `sgen_`-prefixed symbol of their own (e.g. a libc helper called while collecting) are still
         // attributed to GC. Kernel frames are excluded: a syscall made from GC code is still kernel work, not
-        // GC work. This category is per call-stack node, not per frame - see ConvertFrame's cache comment.
+        // GC work. Frames are cached per code address (see ConvertFrame) and the profiler only honors the
+        // frame's category, so such a callee gets a GC-categorized frame of its own - see GetOrCreateGcSubtreeFrame.
         var parentInGcSubtree = firefoxParentCallStackIndex >= 0 && context.StackInGcSubtree[firefoxParentCallStackIndex];
         var inGcSubtree = parentInGcSubtree || IsSgenGcRootFunction(frameTableIndex, context);
-        if (inGcSubtree && category != CategoryKernel)
+        if (inGcSubtree && category != CategoryKernel && category != CategoryGc)
         {
+            frameTableIndex = GetOrCreateGcSubtreeFrame(context.ProfileThread.FrameTable, frameTableIndex, context.MapFrameToGcSubtreeFrame);
             category = CategoryGc;
+            subCategory = 0;
         }
 
         stackTable.Frame.Add(frameTableIndex);
