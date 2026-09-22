@@ -148,6 +148,19 @@ public class UltraConverterToFirefoxEventPipeTests : VerifyBase
             MethodSignature = "()",
             MethodILSize = 42,
             OptimizationTier = OptimizationTier.OptimizedTier1,
+            ModuleID = 1,
+        });
+        // A method whose module never had a load event in the trace: its assembly is unknown (null).
+        threadA.Markers.Add(new JitCompileTraceMarker
+        {
+            StartTime = UTimeSpan.FromMilliseconds(3),
+            Duration = UTimeSpan.FromMilliseconds(1),
+            FullName = "Unknown.Method",
+            MethodNamespace = "Unknown",
+            MethodName = "Method",
+            MethodSignature = "()",
+            MethodILSize = 7,
+            ModuleID = 999,
         });
         threadA.Markers.Add(new GCTraceMarker
         {

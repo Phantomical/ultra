@@ -56,6 +56,11 @@
             "format": "string"
           },
           {
+            "key": "assembly",
+            "label": "Assembly",
+            "format": "string"
+          },
+          {
             "key": "methodILSize",
             "label": "Method IL Size",
             "format": "integer"
@@ -135,6 +140,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -142,6 +148,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -149,6 +156,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -156,6 +164,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -163,6 +172,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -170,6 +180,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -177,6 +188,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -184,6 +196,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -191,6 +204,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -198,6 +212,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -205,6 +220,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -212,6 +228,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -219,6 +236,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -226,6 +244,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -233,6 +252,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -240,6 +260,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -247,6 +268,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -254,6 +276,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -261,6 +284,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"
@@ -268,6 +292,7 @@
           {
             "type": "CC",
             "fullName": "World",
+            "assembly": null,
             "methodILSize": 100,
             "optimizationTier": 0,
             "optimizationTierName": "Unknown"

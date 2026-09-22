@@ -300,7 +300,8 @@ internal class UltraEventProcessor
             MethodNamespace = methodJittingStarted.MethodNamespace,
             MethodName = methodJittingStarted.MethodName,
             MethodSignature = methodJittingStarted.MethodSignature,
-            MethodILSize = methodJittingStarted.MethodILSize
+            MethodILSize = methodJittingStarted.MethodILSize,
+            ModuleID = methodJittingStarted.ModuleID
         };
 
         threadState.PendingJitCompiles[methodJittingStarted.MethodID] = jitCompileMarker;

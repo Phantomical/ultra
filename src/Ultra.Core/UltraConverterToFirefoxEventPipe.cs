@@ -327,7 +327,7 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
             // Convert markers
             foreach (var marker in thread.Markers.Items)
             {
-                ConvertMarker(marker, threadIndex, thread, context);
+                ConvertMarker(marker, threadIndex, thread, process, context);
             }
 
             profileThreads[threadIndex] = profileThread;
@@ -789,7 +789,12 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
     /// <summary>
     /// Converts a model marker to a Firefox marker.
     /// </summary>
-    private void ConvertMarker(UTraceMarker marker, int threadIndex, UTraceThread thread, ThreadConversionContext context)
+    /// <param name="marker">The marker to convert.</param>
+    /// <param name="threadIndex">The position of <paramref name="thread"/> within its process' thread list.</param>
+    /// <param name="thread">The model thread owning the marker.</param>
+    /// <param name="process">The process owning the thread, used to resolve the module a JIT-compiled method belongs to.</param>
+    /// <param name="context">The conversion state for the current output thread.</param>
+    private void ConvertMarker(UTraceMarker marker, int threadIndex, UTraceThread thread, UTraceProcess process, ThreadConversionContext context)
     {
         var markers = context.ProfileThread.Markers;
 
@@ -808,6 +813,9 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
                 markers.Data.Add(new JitCompileEvent
                 {
                     FullName = jitCompile.FullName,
+                    // Same file name as the resource of the method's func (see GetOrCreateResource), so a
+                    // JIT marker and the samples of the method it compiled attribute to the same assembly.
+                    Assembly = process.Modules.TryGetManagedModule(jitCompile.ModuleID, out var jitModule) ? jitModule.ModuleFile.FileName : null,
                     MethodILSize = jitCompile.MethodILSize,
                     OptimizationTier = jitCompile.OptimizationTier
                 });

@@ -288,6 +288,12 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         public Dictionary<MethodIndex, int> MapMethodIndexToFirefox { get; } = new();
         public Dictionary<string, int> MapStringToFirefox { get; } = new(StringComparer.Ordinal);
 
+        /// <summary>
+        /// Maps a module file to the index of its entry in <see cref="ProfileThread"/>'s resource table, so
+        /// that every function of a module shares one resource - see <see cref="GetOrCreateResource"/>.
+        /// </summary>
+        public Dictionary<ModuleFileIndex, int> MapModuleFileIndexToResource { get; } = new();
+
         public Stack<(double, GCSuspendExecutionEngineEvent)> GcSuspendEEEvents { get; } = new();
         public Stack<double> GcRestartEEEvents { get; } = new();
         public Stack<(double, GCEvent)> GcStartStopEvents { get; } = new();
@@ -338,6 +344,8 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             MapMethodIndexToFirefox.TrimExcess();
             MapStringToFirefox.Clear();
             MapStringToFirefox.TrimExcess();
+            MapModuleFileIndexToResource.Clear();
+            MapModuleFileIndexToResource.TrimExcess();
         }
     }
 
@@ -352,9 +360,12 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
     /// </summary>
     private sealed class ProcessModuleContext
     {
-        public ProcessModuleContext(HashSet<ModuleFileIndex> managedModules, ModuleFileIndex clrJitModuleIndex, ModuleFileIndex coreClrModuleIndex)
+        private readonly Dictionary<long, string> _managedModuleFileNames;
+
+        public ProcessModuleContext(HashSet<ModuleFileIndex> managedModules, Dictionary<long, string> managedModuleFileNames, ModuleFileIndex clrJitModuleIndex, ModuleFileIndex coreClrModuleIndex)
         {
             ManagedModules = managedModules;
+            _managedModuleFileNames = managedModuleFileNames;
             ClrJitModuleIndex = clrJitModuleIndex;
             CoreClrModuleIndex = coreClrModuleIndex;
         }
@@ -362,7 +373,21 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         public HashSet<ModuleFileIndex> ManagedModules { get; }
         public ModuleFileIndex ClrJitModuleIndex { get; }
         public ModuleFileIndex CoreClrModuleIndex { get; }
+
+        /// <summary>
+        /// Gets the file name (e.g. <c>MyApp.dll</c>) of the managed module the runtime identifies by
+        /// <paramref name="moduleID"/>, or <c>null</c> when the trace holds no load event for it.
+        /// </summary>
+        public string? GetManagedModuleFileName(long moduleID)
+            => _managedModuleFileNames.TryGetValue(moduleID, out var fileName) ? fileName : null;
     }
+
+    /// <summary>
+    /// The file path TraceEvent gives the placeholder <see cref="TraceModuleFile"/> it creates for a managed
+    /// module it never saw a load event for (e.g. a module loaded before the session started that the CLR
+    /// rundown did not report). Such a module has no usable name, so it is not reported as an assembly.
+    /// </summary>
+    private const string TraceEventUnknownManagedModulePath = "ManagedModule";
 
     /// <summary>Per-process state carried from the setup phase (1) to the finalize phase (3).</summary>
     private sealed class ProcessConvertState
@@ -573,6 +598,11 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                     {
                         FullName =
                             $"{methodJittingStarted.MethodNamespace}.{methodJittingStarted.MethodName}{signature}",
+                        // Same file name as the resource of the method's func (see GetOrCreateResource), so a
+                        // JIT marker and the samples of the method it compiled attribute to the same assembly.
+                        // Null for a module the trace has no load event for, whose func resource keeps
+                        // TraceEvent's "ManagedModule" placeholder name.
+                        Assembly = context.ProcessModules.GetManagedModuleFileName(methodJittingStarted.ModuleID),
                         MethodILSize = methodJittingStarted.MethodILSize
                     };
 
@@ -1520,6 +1550,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         Options.LogProgress?.Invoke($"Loading Modules for process {process.Name} ({process.ProcessID})");
 
         var managedModules = new HashSet<ModuleFileIndex>();
+        var managedModuleFileNames = new Dictionary<long, string>();
         var clrJitModuleIndex = ModuleFileIndex.Invalid;
         var coreClrModuleIndex = ModuleFileIndex.Invalid;
 
@@ -1593,6 +1624,14 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             {
                 managedModules.Add(managedModule.ModuleFile.ModuleFileIndex);
 
+                // Lets JIT compile markers name the assembly of the compiled method from the ModuleID the
+                // runtime reports on MethodJittingStarted. Modules are in load order, so a runtime reusing
+                // a ModuleID after an unload maps it to the module loaded last.
+                if (!string.Equals(managedModule.ModuleFile.FilePath, TraceEventUnknownManagedModulePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    managedModuleFileNames[managedModule.ModuleID] = Path.GetFileName(managedModule.ModuleFile.FilePath);
+                }
+
                 if (nonManagedModulesByFilePath.TryGetValue(managedModule.FilePath, out var otherModules))
                 {
                     foreach (var otherModule in otherModules)
@@ -1603,7 +1642,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             }
         }
 
-        return new ProcessModuleContext(managedModules, clrJitModuleIndex, coreClrModuleIndex);
+        return new ProcessModuleContext(managedModules, managedModuleFileNames, clrJitModuleIndex, coreClrModuleIndex);
     }
 
     /// <summary>
@@ -1849,44 +1888,61 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             var absoluteAddress = _traceLog.CodeAddresses.Address(codeAddressIndex);
 
             funcTable.Name.Add(GetOrCreateString($"{moduleName}!0x{absoluteAddress:X16}", context));
-            funcTable.IsJS.Add(false);
-            funcTable.RelevantForJS.Add(false);
-            funcTable.Resource.Add(-1);
-            funcTable.FileName.Add(null);
-            funcTable.LineNumber.Add(null);
-            funcTable.ColumnNumber.Add(null);
         }
         else
         {
             var fullMethodName = _traceLog.CodeAddresses.Methods.FullMethodName(methodIndex) ?? $"0x{_traceLog.CodeAddresses.Address(codeAddressIndex):X16}";
 
-            var firefoxMethodNameIndex = GetOrCreateString(fullMethodName, context);
-            funcTable.Name.Add(firefoxMethodNameIndex);
-            funcTable.IsJS.Add(false);
-            funcTable.RelevantForJS.Add(false);
-            funcTable.FileName.Add(null); // TODO
-            funcTable.LineNumber.Add(null);
-            funcTable.ColumnNumber.Add(null);
-
-            var moduleIndex = _traceLog.CodeAddresses.ModuleFileIndex(codeAddressIndex);
-            if (moduleIndex != ModuleFileIndex.Invalid && _mapModuleFileIndexToFirefox.TryGetValue(moduleIndex, out var firefoxModuleIndex))
-            {
-                funcTable.Resource.Add(profileThread.ResourceTable.Length);
-
-                var moduleName = Path.GetFileName(_traceLog.ModuleFiles[moduleIndex].FilePath);
-                profileThread.ResourceTable.Name.Add(GetOrCreateString(moduleName, context));
-                profileThread.ResourceTable.Lib.Add(firefoxModuleIndex);
-                profileThread.ResourceTable.Length++;
-            }
-            else
-            {
-                funcTable.Resource.Add(-1);
-            }
+            funcTable.Name.Add(GetOrCreateString(fullMethodName, context));
         }
+
+        funcTable.IsJS.Add(false);
+        funcTable.RelevantForJS.Add(false);
+        // An address without a resolved symbol still belongs to its module (native library or managed
+        // assembly), so it is attributed to the module's resource like a resolved one.
+        funcTable.Resource.Add(GetOrCreateResource(_traceLog.CodeAddresses.ModuleFileIndex(codeAddressIndex), context));
+        funcTable.FileName.Add(null); // TODO
+        funcTable.LineNumber.Add(null);
+        funcTable.ColumnNumber.Add(null);
 
         funcTable.Length++;
 
         return firefoxMethodIndex;
+    }
+
+    /// <summary>
+    /// Gets or creates the resource of the thread's profile for the specified module file: the native library
+    /// or the managed assembly (its IL module file) that the functions attributed to it belong to.
+    /// </summary>
+    /// <param name="moduleIndex">The ETW module file index. Can be invalid.</param>
+    /// <param name="context">The current thread's conversion context.</param>
+    /// <returns>The index of the resource in the Firefox profile thread, or -1 if the module is unknown to the process.</returns>
+    private int GetOrCreateResource(ModuleFileIndex moduleIndex, ThreadConvertContext context)
+    {
+        // A module file that is not a loaded module of the process (e.g. a kernel module) has no lib to
+        // point to, so its functions stay without a resource.
+        if (moduleIndex == ModuleFileIndex.Invalid || !_mapModuleFileIndexToFirefox.TryGetValue(moduleIndex, out var firefoxLibIndex))
+        {
+            return -1;
+        }
+
+        if (context.MapModuleFileIndexToResource.TryGetValue(moduleIndex, out var resourceIndex))
+        {
+            return resourceIndex;
+        }
+
+        var resourceTable = context.ProfileThread.ResourceTable;
+        resourceIndex = resourceTable.Length;
+        context.MapModuleFileIndexToResource.Add(moduleIndex, resourceIndex);
+
+        var moduleName = Path.GetFileName(_traceLog.ModuleFiles[moduleIndex].FilePath);
+        resourceTable.Name.Add(GetOrCreateString(moduleName, context));
+        resourceTable.Lib.Add(firefoxLibIndex);
+        resourceTable.Host.Add(null);
+        resourceTable.Type.Add(1); // 1 = library https://github.com/firefox-devtools/profiler/blob/main/src/types/profile.js (resourceTypes)
+        resourceTable.Length++;
+
+        return resourceIndex;
     }
 
     /// <summary>
