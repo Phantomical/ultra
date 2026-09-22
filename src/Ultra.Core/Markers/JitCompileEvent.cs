@@ -32,6 +32,13 @@ public class JitCompileEvent : FirefoxProfiler.MarkerPayload
     public string FullName { get; set; }
 
     /// <summary>
+    /// Gets or sets the file name of the assembly (IL module) that defines the method, e.g. <c>MyApp.dll</c>,
+    /// taken from the runtime's module load event. It is the same name the method's function resource carries
+    /// in the profile. <c>null</c> when the trace holds no load event for the method's module.
+    /// </summary>
+    public string? Assembly { get; set; }
+
+    /// <summary>
     /// Gets or sets the IL size of the method.
     /// </summary>
     public int MethodILSize { get; set; }
@@ -46,6 +53,8 @@ public class JitCompileEvent : FirefoxProfiler.MarkerPayload
     protected internal override void WriteJson(Utf8JsonWriter writer, FirefoxProfiler.MarkerPayload payload, JsonSerializerOptions options)
     {
         writer.WriteString("fullName", FullName);
+        // Always written (as null when unknown) so external analyzers can rely on the key being present.
+        writer.WriteString("assembly", Assembly);
         writer.WriteNumber("methodILSize", MethodILSize);
         // Both the runtime's numeric tier id (stable for external analyzers) and its name (for humans).
         writer.WriteNumber("optimizationTier", (int)OptimizationTier);
@@ -99,6 +108,12 @@ public class JitCompileEvent : FirefoxProfiler.MarkerPayload
                         Format = FirefoxProfiler.MarkerFormatType.String,
                         Key = "fullName",
                         Label = "Full Name",
+                    },
+                    new FirefoxProfiler.MarkerDataItem()
+                    {
+                        Format = FirefoxProfiler.MarkerFormatType.String,
+                        Key = "assembly",
+                        Label = "Assembly",
                     },
                     new FirefoxProfiler.MarkerDataItem()
                     {

@@ -111,7 +111,11 @@ The JIT and GC markers are displayed in the timeline. You can see the JIT and GC
 
 You can also see them in the Marker Chart and Marker Table view.
 
-Each JIT compile marker records the compiled method's full name, its IL size and the optimization tier the runtime compiled it at: `optimizationTier` holds the runtime's numeric tier id and `optimizationTierName` its name (e.g. `QuickJitted`, `OptimizedTier1`, `OptimizedTier1OSR`; `Unknown` when the runtime does not report a tier). Both are also available to external tools reading the profile JSON.
+Each JIT compile marker records the compiled method's full name, the assembly that defines it, its IL size and the optimization tier the runtime compiled it at: `assembly` holds the file name of the method's assembly (e.g. `MyApp.dll`, `null` when the trace holds no load event for that module), `optimizationTier` the runtime's numeric tier id and `optimizationTierName` its name (e.g. `QuickJitted`, `OptimizedTier1`, `OptimizedTier1OSR`; `Unknown` when the runtime does not report a tier). All of them are also available to external tools reading the profile JSON.
+
+### Assemblies and Native Libraries
+
+Every function of the profile is attached to the module it belongs to, exposed as the function's resource in the profile JSON (`funcTable.resource` → `resourceTable`, which points to the module in `libs`): the native library for native and kernel functions, or the assembly for managed methods (e.g. `MyApp.dll`, `System.Private.CoreLib.dll`). A native address without a resolved symbol is still attached to its library. The Call Tree shows this resource next to each function, and external tools can use it to attribute samples and JIT time per assembly.
 
 ![Profile JIT and GC Markers](profile_markers.png)
 
