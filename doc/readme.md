@@ -78,6 +78,8 @@ When selecting functions, you can visualize the split between the time in the di
 - `Native`: Native functions
 - `Kernel`: Kernel functions - displayed with hexadecimal address
 
+`.NET GC` covers CoreCLR's own collector (`WKS::`/`SVR::` functions), Mono's SGen collector (`sgen_*` functions) and, for a Mono/Unity process, everything called while collecting: the whole call tree under SGen's collection routine (`sgen_perform_collection`) and under its worker thread (`sgen_thread_func`), as well as under Unity's unused-asset collection (`GarbageCollectSharedAssets`, i.e. `Resources.UnloadUnusedAssets`), is attributed to `.NET GC` even where a callee carries no collector symbol of its own. Kernel frames keep their `Kernel` category.
+
 The colors are reflected in the Flame Graph / Stack Chart to easily spot the different usage.
 
 ![Categories](profile_categories.png)
@@ -112,6 +114,8 @@ The JIT and GC markers are displayed in the timeline. You can see the JIT and GC
 You can also see them in the Marker Chart and Marker Table view.
 
 Each JIT compile marker records the compiled method's full name, the assembly that defines it, its IL size and the optimization tier the runtime compiled it at: `assembly` holds the file name of the method's assembly (e.g. `MyApp.dll`, `null` when the trace holds no load event for that module), `optimizationTier` the runtime's numeric tier id and `optimizationTierName` its name (e.g. `QuickJitted`, `OptimizedTier1`, `OptimizedTier1OSR`; `Unknown` when the runtime does not report a tier). All of them are also available to external tools reading the profile JSON.
+
+A `GC Event` marker spans a collection from its `GC Start` to its `GC Stop` event and is shown on the thread that started it, even when the runtime reports the end on another thread (CoreCLR ends a background GC from its background GC thread; Mono's SGen finishes a concurrent major collection on whichever thread triggers the next collection). When the collector ran alongside your code - the world was restarted between the two events - the `GC Concurrent` marker spans that phase, from the end of the initial stop-the-world pause to the start of the final one, on the same thread.
 
 ### Assemblies and Native Libraries
 

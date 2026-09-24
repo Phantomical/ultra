@@ -144,4 +144,28 @@ public abstract class UltraConverterToFirefox : IDisposable
 
         return gcFrameTableIndex;
     }
+
+    /// <summary>
+    /// Whether a resolved function name is an entry point whose entire callee subtree is garbage-collection
+    /// work - not just the frames whose own symbol says so - and should be categorized as <see cref="CategoryGc"/>
+    /// down to the leaves (kernel frames excepted): the collection routine of Mono's SGen collector and the
+    /// main function of its dedicated worker thread, and Unity's unused-asset collection.
+    /// </summary>
+    /// <param name="name">The resolved function name, as stored in the thread's func table.</param>
+    /// <returns><c>true</c> when the callee subtree of the function is GC work.</returns>
+    /// <remarks>
+    /// The SGen collection routine is matched by prefix because the routine that does the work,
+    /// <c>sgen_perform_collection_inner</c>, is a static helper of <c>sgen_perform_collection</c> that some
+    /// Mono builds inline: the collection then resolves under the outer name and under the inner one otherwise.
+    /// <c>sgen_gc_collect</c> (an explicit <c>GC.Collect</c>) calls the same routine and is listed for builds
+    /// that inline that call too.
+    /// </remarks>
+    private protected static bool IsGcSubtreeRootFunction(string name)
+    {
+        return name.StartsWith("sgen_perform_collection", StringComparison.Ordinal)
+            || name is "sgen_gc_collect" or "sgen_thread_func"
+            // Resources.UnloadUnusedAssets: Unity walks the managed heap to find the assets still referenced,
+            // then destroys the rest - all of it collection work, none of it under an sgen_ symbol.
+            || name == "GarbageCollectSharedAssets";
+    }
 }
