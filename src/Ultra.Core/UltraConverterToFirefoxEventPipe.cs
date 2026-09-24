@@ -516,13 +516,14 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
 
         var frameTableIndex = ConvertFrame(frame.CodeAddressIndex, process, context, out var category, out var subCategory);
 
-        // Propagate GC categorization down an SGen collection/worker-thread subtree, so callees that don't
-        // carry a `sgen_`-prefixed symbol of their own (e.g. a libc helper called while collecting) are still
+        // Propagate GC categorization down a collection subtree (Mono's SGen collection routine and worker
+        // thread, Unity's unused-asset collection - see IsGcSubtreeRootFunction), so callees that don't carry
+        // a `sgen_`-prefixed symbol of their own (e.g. a libc helper called while collecting) are still
         // attributed to GC. Kernel frames are excluded: a syscall made from GC code is still kernel work, not
         // GC work. Frames are cached per code address (see ConvertFrame) and the profiler only honors the
         // frame's category, so such a callee gets a GC-categorized frame of its own - see GetOrCreateGcSubtreeFrame.
         var parentInGcSubtree = firefoxParentCallStackIndex >= 0 && context.StackInGcSubtree[firefoxParentCallStackIndex];
-        var inGcSubtree = parentInGcSubtree || IsSgenGcRootFunction(frameTableIndex, context);
+        var inGcSubtree = parentInGcSubtree || IsGcSubtreeRootFrame(frameTableIndex, context);
         if (inGcSubtree && category != CategoryKernel && category != CategoryGc)
         {
             frameTableIndex = GetOrCreateGcSubtreeFrame(context.ProfileThread.FrameTable, frameTableIndex, context.MapFrameToGcSubtreeFrame);
@@ -543,22 +544,15 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
     }
 
     /// <summary>
-    /// The entry points of Mono's SGen collector whose entire callee subtree - not just frames whose own
-    /// symbol happens to start with <c>sgen_</c> - should be categorized as GC: the collection routine itself,
-    /// and the dedicated GC worker thread's main function (which does nothing else).
+    /// Whether the resolved frame at <paramref name="frameTableIndex"/> is a GC-subtree root function - see
+    /// <see cref="UltraConverterToFirefox.IsGcSubtreeRootFunction"/>.
     /// </summary>
-    private static readonly string[] SgenGcRootFunctionNames = ["sgen_perform_collection_inner", "sgen_thread_func"];
-
-    /// <summary>
-    /// Whether the resolved frame at <paramref name="frameTableIndex"/> is one of <see cref="SgenGcRootFunctionNames"/>.
-    /// </summary>
-    private static bool IsSgenGcRootFunction(int frameTableIndex, ThreadConversionContext context)
+    private static bool IsGcSubtreeRootFrame(int frameTableIndex, ThreadConversionContext context)
     {
         var profileThread = context.ProfileThread;
         var funcIndex = profileThread.FrameTable.Func[frameTableIndex];
         var nameIndex = profileThread.FuncTable.Name[funcIndex];
-        var name = profileThread.StringArray[nameIndex];
-        return Array.IndexOf(SgenGcRootFunctionNames, name) >= 0;
+        return IsGcSubtreeRootFunction(profileThread.StringArray[nameIndex]);
     }
 
     /// <summary>
@@ -1155,7 +1149,8 @@ internal sealed class UltraConverterToFirefoxEventPipe : UltraConverterToFirefox
 
         /// <summary>
         /// Parallel to <see cref="ProfileThread"/>'s stack table: whether Firefox stack node <c>i</c> is
-        /// itself, or is a descendant of, a frame resolving to one of <see cref="SgenGcRootFunctionNames"/>.
+        /// itself, or is a descendant of, a frame resolving to a GC-subtree root function (see
+        /// <see cref="UltraConverterToFirefox.IsGcSubtreeRootFunction"/>).
         /// Lets <see cref="ConvertCallStack"/> categorize an entire SGen collection/worker-thread subtree as
         /// GC even where a callee's own symbol (e.g. a libc helper) does not carry a <c>sgen_</c> name.
         /// </summary>

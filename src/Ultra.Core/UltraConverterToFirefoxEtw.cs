@@ -229,7 +229,8 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             int threadIndex,
             int profileThreadIndex,
             List<(double, GCHeapStatsEvent)> gcHeapStatsEvents,
-            Dictionary<long, (JitCompileEvent, double)> jitCompilePendingMethodId)
+            Dictionary<long, (JitCompileEvent, double)> jitCompilePendingMethodId,
+            GcCollectionTracker<ThreadConvertContext, GCEvent> gcCollections)
         {
             Process = process;
             Thread = thread;
@@ -239,6 +240,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             ProfileThreadIndex = profileThreadIndex;
             GcHeapStatsEvents = gcHeapStatsEvents;
             JitCompilePendingMethodId = jitCompilePendingMethodId;
+            GcCollections = gcCollections;
             ThreadEndTimeRelativeMSec = thread.EndTimeRelativeMSec;
         }
 
@@ -270,10 +272,11 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
 
         /// <summary>
         /// Parallel to <see cref="ProfileThread"/>'s stack table: whether Firefox stack node <c>i</c> is
-        /// itself, or is a descendant of, a frame resolving to one of <see cref="SgenGcRootFunctionNames"/>.
-        /// Lets <see cref="ConvertCallStack(CallStackIndex, int, ThreadConvertContext)"/> categorize an entire
-        /// SGen collection/worker-thread subtree as GC even where a callee's own symbol (e.g. a libc helper)
-        /// does not carry a <c>sgen_</c> name.
+        /// itself, or is a descendant of, a frame resolving to a GC-subtree root function (see
+        /// <see cref="UltraConverterToFirefox.IsGcSubtreeRootFunction"/>). Lets
+        /// <see cref="ConvertCallStack(CallStackIndex, int, ThreadConvertContext)"/> categorize an entire
+        /// collection subtree as GC even where a callee's own symbol (e.g. a libc helper) does not carry a
+        /// <c>sgen_</c> name.
         /// </summary>
         public List<bool> StackInGcSubtree { get; } = new();
 
@@ -296,7 +299,16 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
 
         public Stack<(double, GCSuspendExecutionEngineEvent)> GcSuspendEEEvents { get; } = new();
         public Stack<double> GcRestartEEEvents { get; } = new();
-        public Stack<(double, GCEvent)> GcStartStopEvents { get; } = new();
+
+        /// <summary>
+        /// Shared by every thread context of the same process (same instance, like
+        /// <see cref="JitCompilePendingMethodId"/>) - this must stay per-PROCESS, not per-thread. A GCStart
+        /// and the GCEnd of the same collection are not guaranteed to occur on the same thread (Mono's SGen
+        /// finishes a concurrent major collection on whichever thread triggers the next collection; CoreCLR
+        /// ends a background GC from its background GC thread), so a per-thread stack silently dropped those
+        /// collections' markers. The completed collection is reported on the thread its GCStart was raised on.
+        /// </summary>
+        public GcCollectionTracker<ThreadConvertContext, GCEvent> GcCollections { get; }
 
         /// <summary>
         /// Shared by every thread context of the same process (same dictionary instance, mirroring
@@ -478,6 +490,9 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         // per-thread).
         Dictionary<long, (JitCompileEvent, double)> jitCompilePendingMethodId = new();
 
+        // Shared by every thread context of this process as well (see ThreadConvertContext.GcCollections).
+        GcCollectionTracker<ThreadConvertContext, GCEvent> gcCollections = new();
+
         var originalThreads = process.Threads.ToList();
         var cpuTimesInMs = new double[originalThreads.Count];
         for (var i = 0; i < originalThreads.Count; i++)
@@ -527,7 +542,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             // _profileThreadIndex is the base index passed into ThreadVisibilityPlanner.Plan above, plus
             // the number of threads already added in this loop (threadIndex): i.e. exactly
             // visibilityPlan.ProfileThreadIndexByOriginalIndex[visibilityPlan.SortOrder[threadIndex]].
-            var context = new ThreadConvertContext(process, thread, profileThread, processModules, threadIndex, _profileThreadIndex, gcHeapStatsEvents, jitCompilePendingMethodId);
+            var context = new ThreadConvertContext(process, thread, profileThread, processModules, threadIndex, _profileThreadIndex, gcHeapStatsEvents, jitCompilePendingMethodId, gcCollections);
 
             threadContexts.Add(thread, context);
             threadContextList.Add(context);
@@ -701,20 +716,15 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                             GCType = gcStart.Type.ToString()
                         };
 
-                        context.GcStartStopEvents.Push((evt.TimeStampRelativeMSec, gcEvent));
+                        context.GcCollections.OnGcStart(context, gcStart.Count, gcStart.Depth, evt.TimeStampRelativeMSec, gcEvent);
                     }
-                    else if (evt is GCEndTraceData gcEnd && context.GcStartStopEvents.Count > 0)
+                    else if (evt is GCEndTraceData gcEnd)
                     {
-                        var (gcEventStartTime, gcEvent) = context.GcStartStopEvents.Pop();
-
-                        markers.StartTime.Add(gcEventStartTime);
-                        markers.EndTime.Add(evt.TimeStampRelativeMSec);
-                        markers.Category.Add(CategoryGc);
-                        markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
-                        markers.ThreadId.Add(context.ProfileThreadIndex);
-                        markers.Name.Add(GetOrCreateString($"GC Event", context));
-                        markers.Data.Add(gcEvent);
-                        markers.Length++;
+                        // The collection may have started on another thread - its markers go there.
+                        if (context.GcCollections.OnGcEnd(gcEnd.Count, gcEnd.Depth, evt.TimeStampRelativeMSec) is { } collection)
+                        {
+                            AddGcCollectionMarkers(collection);
+                        }
                     }
                     else if (evt is GCSuspendEETraceData gcSuspendEE)
                     {
@@ -725,6 +735,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                         };
 
                         context.GcSuspendEEEvents.Push((evt.TimeStampRelativeMSec, gcSuspendEEEvent));
+                        context.GcCollections.OnSuspendEEStart(evt.TimeStampRelativeMSec);
                     }
                     else if (evt.ID == GCSuspendEEStopEventID && evt is GCNoUserDataTraceData &&
                              context.GcSuspendEEEvents.Count > 0)
@@ -744,19 +755,23 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                     {
                         context.GcRestartEEEvents.Push(evt.TimeStampRelativeMSec);
                     }
-                    else if (evt.ID == GCRestartEEStopEventID && evt is GCNoUserDataTraceData &&
-                             context.GcRestartEEEvents.Count > 0)
+                    else if (evt.ID == GCRestartEEStopEventID && evt is GCNoUserDataTraceData)
                     {
-                        var gcRestartEEEventStartTime = context.GcRestartEEEvents.Pop();
+                        context.GcCollections.OnRestartEEStop(evt.TimeStampRelativeMSec);
 
-                        markers.StartTime.Add(gcRestartEEEventStartTime);
-                        markers.EndTime.Add(evt.TimeStampRelativeMSec);
-                        markers.Category.Add(CategoryGc);
-                        markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
-                        markers.ThreadId.Add(context.ProfileThreadIndex);
-                        markers.Name.Add(GetOrCreateString($"GC Restart EE", context));
-                        markers.Data.Add(null);
-                        markers.Length++;
+                        if (context.GcRestartEEEvents.Count > 0)
+                        {
+                            var gcRestartEEEventStartTime = context.GcRestartEEEvents.Pop();
+
+                            markers.StartTime.Add(gcRestartEEEventStartTime);
+                            markers.EndTime.Add(evt.TimeStampRelativeMSec);
+                            markers.Category.Add(CategoryGc);
+                            markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
+                            markers.ThreadId.Add(context.ProfileThreadIndex);
+                            markers.Name.Add(GetOrCreateString($"GC Restart EE", context));
+                            markers.Data.Add(null);
+                            markers.Length++;
+                        }
                     }
                 }
             }
@@ -1682,13 +1697,14 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         var codeAddressIndex = _traceLog.CallStacks.CodeAddressIndex(callStackIndex);
         var frameTableIndex = ConvertFrame(codeAddressIndex, context, out var category, out var subCategory);
 
-        // Propagate GC categorization down an SGen collection/worker-thread subtree, so callees that don't
-        // carry a `sgen_`-prefixed symbol of their own (e.g. a libc helper called while collecting) are still
+        // Propagate GC categorization down a collection subtree (Mono's SGen collection routine and worker
+        // thread, Unity's unused-asset collection - see IsGcSubtreeRootFunction), so callees that don't carry
+        // a `sgen_`-prefixed symbol of their own (e.g. a libc helper called while collecting) are still
         // attributed to GC. Kernel frames are excluded: a syscall made from GC code is still kernel work, not
         // GC work. Frames are cached per code address (see ConvertFrame) and the profiler only honors the
         // frame's category, so such a callee gets a GC-categorized frame of its own - see GetOrCreateGcSubtreeFrame.
         var parentInGcSubtree = firefoxParentCallStackIndex >= 0 && context.StackInGcSubtree[firefoxParentCallStackIndex];
-        var inGcSubtree = parentInGcSubtree || IsSgenGcRootFunction(frameTableIndex, context);
+        var inGcSubtree = parentInGcSubtree || IsGcSubtreeRootFrame(frameTableIndex, context);
         if (inGcSubtree && category != CategoryKernel && category != CategoryGc)
         {
             frameTableIndex = GetOrCreateGcSubtreeFrame(context.ProfileThread.FrameTable, frameTableIndex, context.MapFrameToGcSubtreeFrame);
@@ -1708,22 +1724,47 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
     }
 
     /// <summary>
-    /// The entry points of Mono's SGen collector whose entire callee subtree - not just frames whose own
-    /// symbol happens to start with <c>sgen_</c> - should be categorized as GC: the collection routine itself,
-    /// and the dedicated GC worker thread's main function (which does nothing else).
+    /// Whether the resolved frame at <paramref name="frameTableIndex"/> is a GC-subtree root function - see
+    /// <see cref="UltraConverterToFirefox.IsGcSubtreeRootFunction"/>.
     /// </summary>
-    private static readonly string[] SgenGcRootFunctionNames = ["sgen_perform_collection_inner", "sgen_thread_func"];
-
-    /// <summary>
-    /// Whether the resolved frame at <paramref name="frameTableIndex"/> is one of <see cref="SgenGcRootFunctionNames"/>.
-    /// </summary>
-    private static bool IsSgenGcRootFunction(int frameTableIndex, ThreadConvertContext context)
+    private static bool IsGcSubtreeRootFrame(int frameTableIndex, ThreadConvertContext context)
     {
         var profileThread = context.ProfileThread;
         var funcIndex = profileThread.FrameTable.Func[frameTableIndex];
         var nameIndex = profileThread.FuncTable.Name[funcIndex];
-        var name = profileThread.StringArray[nameIndex];
-        return Array.Exists(SgenGcRootFunctionNames, candidate => string.Equals(candidate, name, StringComparison.OrdinalIgnoreCase));
+        return IsGcSubtreeRootFunction(profileThread.StringArray[nameIndex]);
+    }
+
+    /// <summary>
+    /// Emits the markers of a completed collection on the thread its GCStart was raised on: its "GC Event"
+    /// span and, when the collector ran alongside the mutator, the "GC Concurrent" span of that phase.
+    /// </summary>
+    /// <param name="collection">The completed collection.</param>
+    private void AddGcCollectionMarkers(GcCollection<ThreadConvertContext, GCEvent> collection)
+    {
+        var context = collection.Thread;
+        var markers = context.ProfileThread.Markers;
+
+        markers.StartTime.Add(collection.StartTimeInMs);
+        markers.EndTime.Add(collection.EndTimeInMs);
+        markers.Category.Add(CategoryGc);
+        markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
+        markers.ThreadId.Add(context.ProfileThreadIndex);
+        markers.Name.Add(GetOrCreateString("GC Event", context));
+        markers.Data.Add(collection.Payload);
+        markers.Length++;
+
+        if (collection.HasConcurrentPhase)
+        {
+            markers.StartTime.Add(collection.ConcurrentStartTimeInMs!.Value);
+            markers.EndTime.Add(collection.ConcurrentEndTimeInMs!.Value);
+            markers.Category.Add(CategoryGc);
+            markers.Phase.Add(FirefoxProfiler.MarkerPhase.Interval);
+            markers.ThreadId.Add(context.ProfileThreadIndex);
+            markers.Name.Add(GetOrCreateString("GC Concurrent", context));
+            markers.Data.Add(new GCConcurrentEvent());
+            markers.Length++;
+        }
     }
 
     /// <summary>
@@ -2073,6 +2114,7 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                     GCAllocationTickEvent.Schema(),
                     GCSuspendExecutionEngineEvent.Schema(),
                     GCRestartExecutionEngineEvent.Schema(),
+                    GCConcurrentEvent.Schema(),
                 }
             }
         };

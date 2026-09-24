@@ -18,6 +18,7 @@ Ultra is an advanced profiler for .NET Applications available on Windows and mac
 - Precise **kernel**, **native** and **managed** **function call stacks**
 - Categorization of functions: 
   - `.NET`, `.NET JIT`, `.NET GC`, `.NET CLR`, `Native`, `Kernel`
+  - `.NET GC` covers CoreCLR's collector, Mono's SGen collector (everything called while collecting) and Unity's unused-asset collection
 - .NET GC Memory track
 - JIT Compile Time Event Markers
   - See which function is getting compiled, its assembly, its IL size and the optimization tier it was compiled at
@@ -25,7 +26,8 @@ Ultra is an advanced profiler for .NET Applications available on Windows and mac
 - GC Events Markers
   - `GC Allocation Ticks`: Details about allocations. 
   - `GCHeapStats`: Statistics about the GC
-  - `GCSuspendEE`, `GCRestartEE`, `GC Start`, `GC Stop` events
+  - `GCSuspendEE`, `GCRestartEE`, `GC Start`, `GC Stop` events, paired across threads
+  - `GC Concurrent`: the phase of a background collection during which the collector runs alongside your code
 - Lightweight trace files - e.g. Generates only a few MB for 10s
 - Requires `net8.0+` via dotnet global tool
 
