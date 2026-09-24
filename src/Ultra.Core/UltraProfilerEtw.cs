@@ -1,4 +1,4 @@
-// Copyright (c) Alexandre Mutel. All rights reserved.
+﻿// Copyright (c) Alexandre Mutel. All rights reserved.
 // Licensed under the BSD-Clause 2 license.
 // See license.txt file in the project root for full license information.
 
@@ -55,6 +55,22 @@ internal sealed class UltraProfilerEtw : UltraProfiler
         // The runner variable is captured by the closures below to read the up-to-date BaseFileName
         // (Run() appends the pid of the launched process to it after this method returns)
         ProfilerRunner runner = null!;
+
+        void DeleteIntermediateFiles()
+        {
+            if (ultraProfilerOptions.KeepEtlIntermediateFiles)
+            {
+                return;
+            }
+
+            foreach (var file in new[] { kernelFileName, userFileName, $"{runner.BaseFileName}.rundown.etl" })
+            {
+                if (File.Exists(file))
+                {
+                    File.Delete(file);
+                }
+            }
+        }
         runner = new ProfilerRunner(baseName)
         {
             OnStart = () =>
@@ -155,29 +171,34 @@ internal sealed class UltraProfilerEtw : UltraProfiler
                     throw new InvalidOperationException("CTRL+C requested");
                 }
 
+                if (!ultraProfilerOptions.KeepMergedEtl && !UltraConverterToFirefox.UseLegacyEtlConverter)
+                {
+                    // The session files are converted as they are, merged by timestamp while they are read (see
+                    // EtlTraceReader). Merging them first rewrites every byte of the trace and only serves a trace
+                    // meant to be kept and opened elsewhere (image identities, volume mapping), so it is done only
+                    // when the merged file was asked for. They are deleted once converted, in OnFinalCleanup.
+                    return [new(kernelFileName), new(userFileName), new(rundownSession)];
+                }
+
                 ultraProfilerOptions.LogProgress?.Invoke($"Merging ETL Files");
                 // Merge file (and to force Volume mapping)
                 etlFinalFile = $"{ultraProfilerOptions.BaseOutputFileName ?? runner.BaseFileName}.etl";
                 TraceEventSession.Merge([kernelFileName, userFileName, rundownSession], etlFinalFile);
-                //TraceEventSession.Merge([kernelFileName, userFileName], $"{baseName}.etl");
 
                 if (StopRequested)
                 {
                     throw new InvalidOperationException("CTRL+C requested");
                 }
 
-                if (!ultraProfilerOptions.KeepEtlIntermediateFiles)
-                {
-                    File.Delete(kernelFileName);
-                    File.Delete(userFileName);
-                    File.Delete(rundownSession);
-                }
+                DeleteIntermediateFiles();
 
                 return [new(etlFinalFile)];
             },
 
             OnFinalCleanup = () =>
             {
+                DeleteIntermediateFiles();
+
                 if (!ultraProfilerOptions.KeepMergedEtl && etlFinalFile is not null)
                 {
                     File.Delete(etlFinalFile);
