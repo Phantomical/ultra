@@ -1,6 +1,9 @@
-// Copyright (c) Alexandre Mutel. All rights reserved.
+﻿// Copyright (c) Alexandre Mutel. All rights reserved.
 // Licensed under the BSD-Clause 2 license.
 // See license.txt file in the project root for full license information.
+
+using System.IO.Compression;
+using System.Text.Json;
 
 namespace Ultra.Core;
 
@@ -77,12 +80,18 @@ public abstract class UltraConverterToFirefox : IDisposable
         var extension = extensions.First();
         if (extension == ".etl")
         {
-            if (traceFiles.Count > 1)
+            if (UseLegacyEtlConverter)
             {
-                throw new ArgumentException("Only one ETL file is supported");
+                if (traceFiles.Count > 1)
+                {
+                    throw new ArgumentException("Only one ETL file is supported by the legacy ETL converter");
+                }
+
+                using var legacyConverter = new UltraConverterToFirefoxEtw(traceFiles, options);
+                return legacyConverter.Convert(processIds);
             }
 
-            using var converter = new UltraConverterToFirefoxEtw(traceFiles, options);
+            using var converter = new UltraConverterToFirefoxEtl(traceFiles, options);
             return converter.Convert(processIds);
         }
         else if (extension == ".nettrace")
@@ -94,6 +103,66 @@ public abstract class UltraConverterToFirefox : IDisposable
         {
             throw new ArgumentException($"Unsupported trace file extension [{extension}]");
         }
+    }
+
+    /// <summary>
+    /// Whether ETL files are converted through the previous <c>TraceLog</c>/<c>.etlx</c> based converter instead
+    /// of the single-pass one. Selected by setting the <c>ULTRA_LEGACY_ETL</c> environment variable to <c>1</c>;
+    /// kept to compare the two conversions on the same trace.
+    /// </summary>
+    internal static bool UseLegacyEtlConverter { get; set; } = Environment.GetEnvironmentVariable("ULTRA_LEGACY_ETL") == "1";
+
+    /// <summary>
+    /// Converts a list of trace files (one or more ETL files, or a list of nettrace files) and writes the resulting
+    /// Firefox profile, gzipped, to <paramref name="outputFilePath"/>.
+    /// </summary>
+    /// <param name="traceFiles">The list of trace files to convert.</param>
+    /// <param name="options">The options used for converting.</param>
+    /// <param name="processIds">The list of process ids to extract from the trace files.</param>
+    /// <param name="outputFilePath">The <c>.json.gz</c> file to write.</param>
+    /// <param name="cancellationToken">Cancels the conversion; no output file is then left behind.</param>
+    /// <exception cref="ArgumentException">The trace files do not share one supported extension.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
+    public static void ConvertToFile(List<UltraProfilerTraceFile> traceFiles, UltraProfilerOptions options, List<int> processIds, string outputFilePath, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(traceFiles);
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(processIds);
+        ArgumentNullException.ThrowIfNull(outputFilePath);
+
+        var extension = GetExtension(traceFiles);
+        if (extension == ".etl" && !UseLegacyEtlConverter)
+        {
+            // Streams each thread as it is converted; see UltraConverterToFirefoxEtl.ConvertToFile.
+            using var converter = new UltraConverterToFirefoxEtl(traceFiles, options);
+            converter.ConvertToFile(processIds, outputFilePath, cancellationToken);
+            return;
+        }
+
+        var profile = Convert(traceFiles, options, processIds);
+        cancellationToken.ThrowIfCancellationRequested();
+        using var stream = File.Create(outputFilePath);
+        using var gzipStream = CreateProfileGZipStream(stream);
+        JsonSerializer.Serialize(gzipStream, profile, FirefoxProfiler.JsonProfilerContext.Default.Profile);
+    }
+
+    // zlib level 5: measured on a 285 MB profile to compress 30% faster than the default level 6 for a file
+    // less than 1% larger.
+    private const int ProfileCompressionLevel = 5;
+
+    /// <summary>Wraps <paramref name="stream"/> in the gzip compressor profiles are written with.</summary>
+    private protected static GZipStream CreateProfileGZipStream(Stream stream)
+        => new(stream, new ZLibCompressionOptions { CompressionLevel = ProfileCompressionLevel });
+
+    private static string GetExtension(List<UltraProfilerTraceFile> traceFiles)
+    {
+        var extensions = traceFiles.Select(x => Path.GetExtension(x.FileName)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (extensions.Count != 1)
+        {
+            throw new ArgumentException($"All trace files must have the same extension. Instead got [{string.Join(", ", extensions)}]");
+        }
+
+        return extensions.First();
     }
 
     private FirefoxProfiler.Profile Convert(List<int> processIds)

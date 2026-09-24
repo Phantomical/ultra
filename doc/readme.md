@@ -160,8 +160,10 @@ Usage: ultra profile [Options] <pid | -- execName arg0 arg1...>
                                       as many captures as you want before quitting.
       --delay=VALUE                 Starts profiling after a specific delay (seconds). Default is 0s.
       --duration=VALUE              Run the profiler for a maximum duration (seconds). Default is 120s
-      --keep-merged-etl-file        Keep the merged ETL file.
-      --keep-intermediate-etl-files Keep the intermediate ETL files before merging.
+      --keep-merged-etl-file        Merge the kernel, user and rundown ETL files into one ETL file and keep it.
+                                      Without it, the session files are converted directly and no merged file
+                                      is produced.
+      --keep-intermediate-etl-files Keep the kernel, user and rundown ETL files of the session.
       --mode=VALUE                  Defines how the stdout/stderr of a program explicitly started by ultra should be
                                       integrated in its output. Default is `silent` which will not mix program's
                                       output. The other options are: `raw` is going to mix ultra and program output
@@ -173,7 +175,7 @@ Usage: ultra profile [Options] <pid | -- execName arg0 arg1...>
 
 With `--paused`, you don't have to exit ultra to capture more than one profile, and you don't have to
 wait for one capture to finish saving before starting the next one. Each SPACE/ENTER → S cycle produces
-its own `.json.gz` file; saving a capture (CLR rundown, ETL merge, JSON conversion) happens in the
+its own `.json.gz` file; saving a capture (CLR rundown, JSON conversion) happens in the
 background, so you can immediately press SPACE/ENTER again to start capturing while an earlier one is
 still being saved. The profiled process (or `--pid` target) keeps running the whole time.
 
@@ -186,7 +188,7 @@ $ ultra.exe profile --paused -- my_command.exe arg0 arg1 arg2...
 │ Capture   │ Status                                                                │
 ├───────────┼──────────────────────────────────────────────────────────────────────┤
 │ Capture 1 │ ✓ Done - Saved -> ultra_my_command_..._pid_1234.json.gz (4.1MB)        │
-│ Capture 2 │ ⠋ Saving - Merging ETL Files                                          │
+│ Capture 2 │ ⠋ Saving - Reading Events                                             │
 │ Capture 3 │ ⠋ Profiling - Profiling Process my_command (1234) - 3s - 820KB        │
 └───────────┴──────────────────────────────────────────────────────────────────────┘
 ```
@@ -200,10 +202,15 @@ $ ultra.exe profile --paused -- my_command.exe arg0 arg1 arg2...
 
 Convert an existing ETL file to a Firefox Profiler json file:
 
-It requires a list of PID in order to only produce results for these processes. 
+It requires a list of PID in order to only produce results for these processes.
+
+Several ETL files can be given at once; they are merged by timestamp while they are read, so the
+kernel, user and rundown session files kept with `--keep-intermediate-etl-files` can be converted
+without merging them into one file first. The ETL files are read in a single pass and never converted to
+an `.etlx` file.
 
 ```console
-Usage: ultra convert --pid xxx <etl_file_name.etl>
+Usage: ultra convert --pid xxx <trace.etl> [<more.etl>...]
 
   -h, -?, --help                    Show this message and exit
   -o, --output=FILE                 The base output FILE name. Default is the input file name without the extension.

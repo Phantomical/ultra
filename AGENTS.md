@@ -14,6 +14,7 @@ Paths/commands below are relative to this repository root.
 - Core library: `src/Ultra.Core/`
   - Profiling orchestration: `UltraProfiler*.cs`, `DiagnosticPortSession.cs`.
   - Event processing/conversion: `Parser/`, `UltraConverterToFirefox*.cs`, `FirefoxProfiler.cs`.
+  - ETL conversion: `Etw/` reads raw `.etl` files in one pass (`EtlTraceReader` builds an `EtlTraceModel`, `EtlSymbolResolver` resolves symbols) and `UltraConverterToFirefoxEtl.cs` builds and streams the profile; `UltraConverterToFirefoxEtw.cs` is the previous `TraceLog`/`.etlx` converter, selectable with `ULTRA_LEGACY_ETL=1` for comparisons.
   - Native module/symbol support, including Mach-O parsing: `MachO/`, `Model/`.
 - Custom sampler: `src/Ultra.Sampler/`
   - Newer NativeAOT sampler used for macOS ARM64.

@@ -1,4 +1,4 @@
-// Copyright (c) Alexandre Mutel. All rights reserved.
+﻿// Copyright (c) Alexandre Mutel. All rights reserved.
 // Licensed under the BSD-Clause 2 license.
 // See license.txt file in the project root for full license information.
 using System.Text;
@@ -48,8 +48,8 @@ internal class Program
                 { "paused", "Launch the profiler paused and wait for SPACE or ENTER to start profiling. While profiling, press S to stop and save that capture and wait for a new one, or Q to stop and quit. You can start/stop as many captures as you want before quitting.", v => options.Paused = v is not null },
                 { "delay=", $"Starts profiling after a specific delay (seconds). Default is {options.DelayInSeconds}s.", (double delay) => options.DelayInSeconds = delay },
                 { "duration=", $"Run the profiler for a maximum duration (seconds). Default is {options.DurationInSeconds}s", (double duration) => options.DurationInSeconds = duration },
-                { "keep-merged-etl-file", "Keep the merged ETL file.", v => options.KeepMergedEtl = v is not null },
-                { "keep-intermediate-etl-files", "Keep the intermediate ETL files before merging.", v => options.KeepEtlIntermediateFiles = v is not null },
+                { "keep-merged-etl-file", "Merge the kernel, user and rundown ETL files into one ETL file and keep it. Without it, the session files are converted directly and no merged file is produced.", v => options.KeepMergedEtl = v is not null },
+                { "keep-intermediate-etl-files", "Keep the kernel, user and rundown ETL files of the session.", v => options.KeepEtlIntermediateFiles = v is not null },
                 { "mode=", "Defines how the stdout/stderr of a program explicitly started by ultra should be integrated in its output. Default is `silent` which will not mix program's output. The other options are: `raw` is going to mix ultra and program output together in a raw output. `live` is going to mix ultra and program output within a live table.", v =>
                     {
                         if ("raw".Equals(v, StringComparison.OrdinalIgnoreCase))
@@ -347,9 +347,9 @@ internal class Program
                     return 0;
                 }
             },
-            new Command("convert", "Convert an existing trace file (one ETL file or a list of nettrace files) to a Firefox Profiler json file")
+            new Command("convert", "Convert an existing trace (one or more ETL files, or a list of nettrace files) to a Firefox Profiler json file")
             {
-                new CommandUsage("Usage: {NAME} --pid xxx [<etl_file_name.etl> | <file1_sampler.nettrace> <file1_clr.nettrace>]"),
+                new CommandUsage("Usage: {NAME} --pid xxx [<trace.etl> [<more.etl>...] | <file1_sampler.nettrace> <file1_clr.nettrace>]"),
                 _,
                 new HelpOption(),
                 { "o|output=", "The base output {FILE} name. Default is the input file name without the extension.", v => options.BaseOutputFileName = v },

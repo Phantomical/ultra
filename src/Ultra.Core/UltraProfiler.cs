@@ -1,4 +1,4 @@
-// Copyright (c) Alexandre Mutel. All rights reserved.
+﻿// Copyright (c) Alexandre Mutel. All rights reserved.
 // Licensed under the BSD-Clause 2 license.
 // See license.txt file in the project root for full license information.
 
@@ -513,23 +513,26 @@ public abstract class UltraProfiler : IDisposable
     /// <param name="ultraProfilerOptions">The options for the profiler.</param>
     /// <returns>A task that represents the asynchronous operation. The task result contains the path to the generated JSON file.</returns>
     /// <exception cref="InvalidOperationException">Thrown when a stop request is received.</exception>
-    public async Task<string> Convert(string baseFileNameOutput, List<UltraProfilerTraceFile> traceFiles, List<int> pIds, UltraProfilerOptions ultraProfilerOptions)
+    public Task<string> Convert(string baseFileNameOutput, List<UltraProfilerTraceFile> traceFiles, List<int> pIds, UltraProfilerOptions ultraProfilerOptions)
     {
-        var profile = UltraConverterToFirefox.Convert(traceFiles, ultraProfilerOptions, pIds);
-
-        if (StopRequested)
+        var jsonFinalFile = $"{ultraProfilerOptions.BaseOutputFileName ?? baseFileNameOutput}.json.gz";
+        try
+        {
+            UltraConverterToFirefox.ConvertToFile(traceFiles, ultraProfilerOptions, pIds, jsonFinalFile, CancellationToken);
+        }
+        catch (OperationCanceledException)
         {
             throw new InvalidOperationException("CTRL+C requested");
         }
 
-        var jsonFinalFile = $"{ultraProfilerOptions.BaseOutputFileName ?? baseFileNameOutput}.json.gz";
-        ultraProfilerOptions.LogProgress?.Invoke($"Converting to Firefox Profiler JSON");
-        await using var stream = File.Create(jsonFinalFile);
-        await using var gzipStream = new GZipStream(stream, CompressionLevel.Optimal);
-        await JsonSerializer.SerializeAsync(gzipStream, profile, FirefoxProfiler.JsonProfilerContext.Default.Profile);
-        gzipStream.Flush();
+        if (StopRequested)
+        {
+            // Stopped right after the file was completed: keep the previous behavior of producing nothing.
+            try { File.Delete(jsonFinalFile); } catch (IOException) { }
+            throw new InvalidOperationException("CTRL+C requested");
+        }
 
-        return jsonFinalFile;
+        return Task.FromResult(jsonFinalFile);
     }
 
     private async Task EnableProfiling(ProfilerRunner runner, UltraProfilerOptions ultraProfilerOptions)
