@@ -659,7 +659,8 @@ internal class Program
                     _logLines.Dequeue();
                 }
 
-                _logLines.Enqueue(text);
+                // Program output is raw text and may contain brackets (e.g. Unity's "[UnityMemory]"), so escape it
+                _logLines.Enqueue(Markup.Escape(text));
                 Refresh();
             }
         }
