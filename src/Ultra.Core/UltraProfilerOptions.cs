@@ -170,6 +170,20 @@ public class UltraProfilerOptions
     public float CpuSamplingIntervalInMs { get; set; }
 
     /// <summary>
+    /// Gets or sets a value indicating whether CPU samples are taken by suspending and walking the threads of the
+    /// profiled processes from ultra itself instead of by the kernel ETW session (Windows x64 only). This mode does
+    /// not need administrator rights (only the right to start a user ETW session, e.g. as a member of
+    /// <c>Performance Log Users</c>) and has no kernel stacks or context switches. Its default sampling interval is
+    /// <see cref="UserModeSamplingDefaultIntervalInMs"/>.
+    /// </summary>
+    public bool UserModeSampling { get; set; }
+
+    /// <summary>
+    /// The sampling interval used by <see cref="UserModeSampling"/> when none is set explicitly, in milliseconds.
+    /// </summary>
+    public const float UserModeSamplingDefaultIntervalInMs = 1.0f;
+
+    /// <summary>
     /// Gets or sets the symbol path text.
     /// </summary>
     public string? SymbolPathText { get; set; }

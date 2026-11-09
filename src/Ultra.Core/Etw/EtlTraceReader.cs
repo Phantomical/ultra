@@ -12,6 +12,7 @@ using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Parsers.Clr;
 using Microsoft.Diagnostics.Tracing.Parsers.Kernel;
 using Microsoft.Diagnostics.Tracing.Parsers.Symbol;
+using Ultra.Core.Etw.UserMode;
 using Ultra.Core.Markers;
 
 namespace Ultra.Core.Etw;
@@ -206,6 +207,13 @@ internal sealed class EtlTraceReader
         if (qpc > _model.SessionEndTimeQPC)
         {
             _model.SessionEndTimeQPC = qpc;
+        }
+
+        if (data.ProviderGuid == UserModeSamplerEvents.ProviderGuid)
+        {
+            // Raised by the profiler's process on behalf of the sampled one: no bookkeeping for the profiler's thread.
+            OnUserModeSamplerEvent(data);
+            return;
         }
 
         if (_bookkeepingDone)
@@ -733,6 +741,153 @@ internal sealed class EtlTraceReader
     }
 
     private static bool IsKernelAddress(ulong address, int pointerSize) => EtlTraceModel.IsKernelAddress(address, pointerSize);
+
+    // ---------------------------------------------------------------------------------------------------------
+    // User-mode sampler events (a session without the kernel provider, see UserModeSampler)
+    // ---------------------------------------------------------------------------------------------------------
+
+    private unsafe void OnUserModeSamplerEvent(TraceEvent data)
+    {
+        var payload = new ReadOnlySpan<byte>((void*)data.DataStart, data.EventDataLength);
+        var qpc = data.TimeStampQPC;
+        switch ((int)data.ID)
+        {
+            case UserModeSamplerEvents.ProcessInfoId when payload.Length >= 10:
+            {
+                var info = UserModeSamplerEvents.DecodeProcessInfo(payload);
+                var process = _model.GetOrCreateProcess(info.ProcessId, qpc);
+                // Attached to a running process: it is there from the session start, like a kernel DCStart.
+                process.StartTimeQPC = _model.SessionStartTimeQPC;
+                process.ImageFileName = info.ImagePath;
+                if (process.CommandLine.Length == 0)
+                {
+                    process.CommandLine = info.ImagePath;
+                }
+
+                if (info.SamplingIntervalMs > 0)
+                {
+                    _model.SampleIntervalMs = info.SamplingIntervalMs;
+                }
+
+                break;
+            }
+            case UserModeSamplerEvents.ThreadStartId when payload.Length >= 11:
+            {
+                var info = UserModeSamplerEvents.DecodeThreadStart(payload);
+                var process = _model.GetOrCreateProcess(info.ProcessId, qpc);
+                // Runtime events of the thread may have created its record already; a new record only replaces an ended one.
+                var existing = _model.FindThread(info.ThreadId, qpc);
+                var isCreate = existing is not null && existing.EndTimeQPC != long.MaxValue;
+                var thread = _model.GetOrCreateThread(info.ThreadId, qpc, process, isCreate);
+                thread.StartTimeQPC = (info.Flags & UserModeSamplerEvents.FlagRundown) != 0 ? _model.SessionStartTimeQPC : qpc;
+                if (info.Name.Length > 0)
+                {
+                    _model.ThreadNamesById[info.ThreadId] = info.Name;
+                }
+
+                break;
+            }
+            case UserModeSamplerEvents.ThreadStopId when payload.Length >= 8:
+            {
+                var (processId, threadId) = UserModeSamplerEvents.DecodeThreadStop(payload);
+                var process = _model.GetOrCreateProcess(processId, qpc);
+                _model.GetOrCreateThread(threadId, qpc, process).EndTimeQPC = qpc;
+                break;
+            }
+            case UserModeSamplerEvents.ModuleLoadId when payload.Length >= 27:
+            {
+                var info = UserModeSamplerEvents.DecodeModuleLoad(payload);
+                var process = _model.GetOrCreateProcess(info.ProcessId, qpc);
+                if (!process.IsTarget)
+                {
+                    break;
+                }
+
+                var fileIndex = _model.ModuleFiles.GetOrCreate(info.Path, info.ImageBase);
+                var file = _model.ModuleFiles[fileIndex];
+                file.ImageSize = (int)info.ImageSize;
+                file.ImageChecksum = (int)info.Checksum;
+                file.TimeDateStamp = (int)info.TimeDateStamp;
+                process.LoadedModules.Add(new EtlLoadedModule(fileIndex, info.ImageBase)
+                {
+                    LoadTimeQPC = (info.Flags & UserModeSamplerEvents.FlagRundown) != 0 ? _model.SessionStartTimeQPC : qpc,
+                });
+                break;
+            }
+            case UserModeSamplerEvents.ModuleUnloadId when payload.Length >= 12:
+            {
+                var (processId, imageBase) = UserModeSamplerEvents.DecodeModuleUnload(payload);
+                var process = _model.GetOrCreateProcess(processId, qpc);
+                if (!process.IsTarget)
+                {
+                    break;
+                }
+
+                for (var i = process.LoadedModules.Count - 1; i >= 0; i--)
+                {
+                    var module = process.LoadedModules[i];
+                    if (module.ImageBase == imageBase && module.UnloadTimeQPC == long.MaxValue)
+                    {
+                        module.UnloadTimeQPC = qpc;
+                        var file = _model.ModuleFiles[module.ModuleFileIndex];
+                        AssignModuleToUnresolvedAddressesInRange(process, imageBase, file.ImageSize, file.Index);
+                        break;
+                    }
+                }
+
+                break;
+            }
+            case UserModeSamplerEvents.SampleId when payload.Length >= 12:
+                OnUserModeSample(payload, qpc, data.TimeStampRelativeMSec);
+                break;
+        }
+    }
+
+    private void OnUserModeSample(ReadOnlySpan<byte> payload, long qpc, double timeMs)
+    {
+        var (processId, threadId, _) = UserModeSamplerEvents.DecodeSample(payload, out var frames);
+        var process = _model.GetOrCreateProcess(processId, qpc);
+        var thread = _model.GetOrCreateThread(threadId, qpc, process);
+        thread.CpuSamples++;
+        if (!process.IsTarget || frames.Length == 0)
+        {
+            return;
+        }
+
+        // Built from the root (the last frame) down to the leaf, reusing the prefix shared with the thread's last stack.
+        var frameCount = frames.Length;
+        if (thread.LastStackAddresses.Length < frameCount)
+        {
+            var newLength = Math.Max(frameCount, thread.LastStackAddresses.Length * 2);
+            Array.Resize(ref thread.LastStackAddresses, newLength);
+            Array.Resize(ref thread.LastStackNodes, newLength);
+        }
+
+        var lastAddresses = thread.LastStackAddresses;
+        var lastNodes = thread.LastStackNodes;
+        var lastDepth = thread.LastStackDepth;
+        var stacks = _model.Stacks;
+        var node = EtlStackTable.RootForProcess(process);
+        for (int i = frameCount - 1, depth = 0; i >= 0; i--, depth++)
+        {
+            var address = frames[i];
+            if (depth < lastDepth && lastAddresses[depth] == address)
+            {
+                node = lastNodes[depth];
+                continue;
+            }
+
+            lastDepth = 0;
+            node = stacks.Intern(node, address, process, _model);
+            lastAddresses[depth] = address;
+            lastNodes[depth] = node;
+        }
+
+        thread.LastStackDepth = frameCount;
+        thread.SampleTimesMs.Add(timeMs);
+        thread.SampleLastSwitchInMs.Add(thread.LastSwitchInMs);
+        thread.SampleStacks.Add(node);
+    }
 
     // ---------------------------------------------------------------------------------------------------------
     // Symbol events (injected by an ETL merge)

@@ -48,7 +48,7 @@ $ dotnet tool install -g Ultra # The command ultra.exe will be available from yo
 > ____
 > 🚨 The profiler **requires to run from an elevated prompt with administrative rights** 🚨 
 >
-> _This is required to allow to collect full stack traces, including kernel and native functions._
+> _This is required to allow to collect full stack traces, including kernel and native functions. Without it, ultra falls back to a user-mode sampler (`--user-mode-sampling`), without kernel stacks._
 > ____
 
 Example: open a **terminal with administrative rights**, to profile an executable called `my_commands.exe`:
@@ -65,6 +65,12 @@ Profiling a running application just requires the PID of the process to profile:
 $ ultra.exe profile 15243 # PID of the process to profile
 # Wait for a bit and press only one CTRL+C to stop the profiling
 ```
+
+#### Without administrative rights (user-mode sampling)
+
+When ultra is not elevated, or with `--user-mode-sampling`, ultra samples the profiled process from its own process instead of the kernel ETW session: at each tick (1ms by default) it suspends each thread that used CPU since the last sample, copies its registers and stack, resumes it, and walks the stack with the x64 unwind data of the loaded images and of the JIT code registered with the OS (dynamic function tables). The .NET runtime events (JIT method names, GC) are still recorded with a user ETW session, which only requires to be a member of the `Performance Log Users` group.
+
+This mode is Windows x64 only. It has no kernel stacks and no context switches, a thread is sampled in proportion to its CPU time but may be caught in a wait it just entered, and its samples cost the profiled threads a short suspension (tens of microseconds).
 
 ### macOS (Apple Silicon)
 

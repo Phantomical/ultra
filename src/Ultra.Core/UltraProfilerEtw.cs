@@ -3,21 +3,25 @@
 // See license.txt file in the project root for full license information.
 
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using ByteSizeLib;
 using Microsoft.Diagnostics.Tracing;
 using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Parsers.Clr;
 using Microsoft.Diagnostics.Tracing.Session;
+using Ultra.Core.Etw.UserMode;
 
 namespace Ultra.Core;
 
 /// <summary>
 /// A profiler that uses Event Tracing for Windows (ETW) to collect performance data.
 /// </summary>
+[System.Runtime.Versioning.SupportedOSPlatform("windows")]
 internal sealed class UltraProfilerEtw : UltraProfiler
 {
     private TraceEventSession? _userSession;
     private TraceEventSession? _kernelSession;
+    private UserModeSampler? _sampler;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="UltraProfiler"/> class.
@@ -28,6 +32,9 @@ internal sealed class UltraProfilerEtw : UltraProfiler
 
     private protected override void DisposeImpl()
     {
+        _sampler?.Dispose();
+        _sampler = null;
+
         DisposeSessions();
     }
 
@@ -42,6 +49,11 @@ internal sealed class UltraProfilerEtw : UltraProfiler
 
     private protected override ProfilerRunner CreateRunner(UltraProfilerOptions ultraProfilerOptions, List<Process> processList, string baseName, Process? singleProcess)
     {
+        if (ultraProfilerOptions.UserModeSampling)
+        {
+            return CreateUserModeRunner(ultraProfilerOptions, processList, baseName);
+        }
+
         var options = new TraceEventProviderOptions()
         {
             StacksEnabled = true,
@@ -141,30 +153,7 @@ internal sealed class UltraProfilerEtw : UltraProfiler
             {
 
                 var rundownSession = $"{runner.BaseFileName}.rundown.etl";
-                using (TraceEventSession clrRundownSession = new TraceEventSession($"{runner.BaseFileName}-rundown", rundownSession))
-                {
-                    clrRundownSession.StopOnDispose = true;
-                    clrRundownSession.CircularBufferMB = 0;
-
-                    ultraProfilerOptions.LogProgress?.Invoke($"Running CLR Rundown");
-
-                    // The runtime does method rundown first then the module rundown.  This means if you have a large
-                    // number of methods and method rundown does not complete you don't get ANYTHING.   To avoid this
-                    // we first trigger all module (loader) rundown and then trigger the method rundown
-                    clrRundownSession.EnableProvider(
-                        ClrRundownTraceEventParser.ProviderGuid,
-                        TraceEventLevel.Verbose,
-                        (ulong)(ClrRundownTraceEventParser.Keywords.Loader | ClrRundownTraceEventParser.Keywords.ForceEndRundown), options);
-
-                    await Task.Delay(500);
-
-                    clrRundownSession.EnableProvider(
-                        ClrRundownTraceEventParser.ProviderGuid,
-                        TraceEventLevel.Verbose,
-                        (ulong)(ClrRundownTraceEventParser.Keywords.Default & ~ClrRundownTraceEventParser.Keywords.Loader), options);
-
-                    await WaitForStaleFile(rundownSession, ultraProfilerOptions);
-                }
+                await RunClrRundown(runner.BaseFileName, rundownSession, options, ultraProfilerOptions);
 
                 if (StopRequested)
                 {
@@ -228,27 +217,200 @@ internal sealed class UltraProfilerEtw : UltraProfiler
                                    | KernelTraceEventParser.Keywords.Thread;
                 _kernelSession.EnableKernelProvider(kernelEvents, KernelTraceEventParser.Keywords.Profile);
 
-                var jitEvents = ClrTraceEventParser.Keywords.JITSymbols |
-                                ClrTraceEventParser.Keywords.Exception |
-                                ClrTraceEventParser.Keywords.GC |
-                                ClrTraceEventParser.Keywords.GCHeapAndTypeNames |
-                                ClrTraceEventParser.Keywords.Interop |
-                                ClrTraceEventParser.Keywords.JITSymbols |
-                                ClrTraceEventParser.Keywords.Jit |
-                                ClrTraceEventParser.Keywords.JittedMethodILToNativeMap |
-                                ClrTraceEventParser.Keywords.Loader |
-                                ClrTraceEventParser.Keywords.Stack |
-                                ClrTraceEventParser.Keywords.StartEnumeration;
-
                 _userSession.EnableProvider(
                     ClrTraceEventParser.ProviderGuid,
                     TraceEventLevel.Verbose, // For call stacks.
-                    (ulong)jitEvents, options);
+                    (ulong)ClrEvents, options);
 
 
                 // Reset the clock to account for the duration of the profiler
                 ProfilerClock.Restart();
 
+                return Task.CompletedTask;
+            }
+        };
+
+        return runner;
+    }
+
+    private const ClrTraceEventParser.Keywords ClrEvents =
+        ClrTraceEventParser.Keywords.JITSymbols |
+        ClrTraceEventParser.Keywords.Exception |
+        ClrTraceEventParser.Keywords.GC |
+        ClrTraceEventParser.Keywords.GCHeapAndTypeNames |
+        ClrTraceEventParser.Keywords.Interop |
+        ClrTraceEventParser.Keywords.Jit |
+        ClrTraceEventParser.Keywords.JittedMethodILToNativeMap |
+        ClrTraceEventParser.Keywords.Loader |
+        ClrTraceEventParser.Keywords.Stack |
+        ClrTraceEventParser.Keywords.StartEnumeration;
+
+    private async Task RunClrRundown(string baseFileName, string rundownFileName, TraceEventProviderOptions options, UltraProfilerOptions ultraProfilerOptions)
+    {
+        using TraceEventSession clrRundownSession = new TraceEventSession($"{baseFileName}-rundown", rundownFileName);
+        clrRundownSession.StopOnDispose = true;
+        clrRundownSession.CircularBufferMB = 0;
+
+        ultraProfilerOptions.LogProgress?.Invoke($"Running CLR Rundown");
+
+        // The runtime does method rundown first then the module rundown.  This means if you have a large
+        // number of methods and method rundown does not complete you don't get ANYTHING.   To avoid this
+        // we first trigger all module (loader) rundown and then trigger the method rundown
+        clrRundownSession.EnableProvider(
+            ClrRundownTraceEventParser.ProviderGuid,
+            TraceEventLevel.Verbose,
+            (ulong)(ClrRundownTraceEventParser.Keywords.Loader | ClrRundownTraceEventParser.Keywords.ForceEndRundown), options);
+
+        await Task.Delay(500);
+
+        clrRundownSession.EnableProvider(
+            ClrRundownTraceEventParser.ProviderGuid,
+            TraceEventLevel.Verbose,
+            (ulong)(ClrRundownTraceEventParser.Keywords.Default & ~ClrRundownTraceEventParser.Keywords.Loader), options);
+
+        await WaitForStaleFile(rundownFileName, ultraProfilerOptions);
+    }
+
+    /// <summary>
+    /// The runner of <see cref="UltraProfilerOptions.UserModeSampling"/>: a single user session records the runtime
+    /// events and the samples the <see cref="UserModeSampler"/> takes from ultra's own process; no kernel session.
+    /// </summary>
+    private ProfilerRunner CreateUserModeRunner(UltraProfilerOptions ultraProfilerOptions, List<Process> processList, string baseName)
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            throw new PlatformNotSupportedException("User-mode sampling is only supported on Windows x64");
+        }
+
+        var options = new TraceEventProviderOptions()
+        {
+            StacksEnabled = false,
+        };
+
+        var userFileName = $"{baseName}.user.etl";
+        string? etlFinalFile = null;
+        ProfilerRunner runner = null!;
+
+        void DeleteIntermediateFiles()
+        {
+            if (!ultraProfilerOptions.KeepEtlIntermediateFiles && File.Exists(userFileName))
+            {
+                File.Delete(userFileName);
+            }
+        }
+
+        void DisposeSampler()
+        {
+            try { _sampler?.Dispose(); } catch { /* ignore */ }
+            _sampler = null;
+        }
+
+        runner = new ProfilerRunner(baseName)
+        {
+            OnStart = () =>
+            {
+                if (processList.Count > 0)
+                {
+                    options.ProcessIDFilter = processList.Select(x => x.Id).ToList();
+                }
+
+                if (ultraProfilerOptions.ProgramPath != null)
+                {
+                    options.ProcessNameFilter = [Path.GetFileName(ultraProfilerOptions.ProgramPath)];
+                }
+
+                _userSession = new TraceEventSession($"{baseName}-user", userFileName);
+                return Task.CompletedTask;
+            },
+
+            OnProfiling = () => File.Exists(userFileName) ? new FileInfo(userFileName).Length : 0,
+
+            OnProcessStarted = process =>
+            {
+                _sampler?.AddProcess(process.Id);
+                return Task.CompletedTask;
+            },
+
+            OnStop = async () =>
+            {
+                if (_sampler is { } sampler)
+                {
+                    sampler.Stop();
+                    ultraProfilerOptions.LogProgress?.Invoke(sampler.Summary);
+                }
+
+                _userSession?.Stop();
+                await WaitForStaleFile(userFileName, ultraProfilerOptions);
+            },
+
+            OnCatch = () =>
+            {
+                DisposeSampler();
+                DisposeSessions();
+                try { File.Delete(userFileName); } catch { /* ignore */ }
+                return Task.CompletedTask;
+            },
+
+            OnFinally = () =>
+            {
+                DisposeSampler();
+                DisposeSessions();
+                return Task.CompletedTask;
+            },
+
+            FinishFileToConvert = async () =>
+            {
+                // No end-of-capture rundown session: the start enumeration of the user session already reported the
+                // code that existed when sampling started, and the Mono runtime's ETW profiler was seen to abort the
+                // process in its rundown provider callback (a thread detach assertion on the ETW notification thread).
+                if (StopRequested)
+                {
+                    throw new InvalidOperationException("CTRL+C requested");
+                }
+
+                if (!ultraProfilerOptions.KeepMergedEtl && !UltraConverterToFirefox.UseLegacyEtlConverter)
+                {
+                    return [new(userFileName)];
+                }
+
+                ultraProfilerOptions.LogProgress?.Invoke($"Merging ETL Files");
+                etlFinalFile = $"{ultraProfilerOptions.BaseOutputFileName ?? runner.BaseFileName}.etl";
+                TraceEventSession.Merge([userFileName], etlFinalFile);
+                DeleteIntermediateFiles();
+                return [new(etlFinalFile)];
+            },
+
+            OnFinalCleanup = () =>
+            {
+                DeleteIntermediateFiles();
+                if (!ultraProfilerOptions.KeepMergedEtl && etlFinalFile is not null)
+                {
+                    File.Delete(etlFinalFile);
+                    File.Delete(Path.ChangeExtension(etlFinalFile, ".etlx"));
+                }
+
+                return Task.CompletedTask;
+            },
+
+            OnEnablingProfiling = () =>
+            {
+                var session = _userSession!;
+                session.StopOnDispose = true;
+                session.CircularBufferMB = 0;
+                session.BufferSizeMB = Math.Max(session.BufferSizeMB, 256);
+
+                // The sampler's events come from ultra's process: no process filter for its provider.
+                session.EnableProvider(UserModeSamplerEvents.ProviderGuid, TraceEventLevel.Verbose, ulong.MaxValue);
+
+                // The processes, threads and images are written before the runtime's start enumeration so that they
+                // precede the runtime events of these processes.
+                var intervalMs = ultraProfilerOptions.CpuSamplingIntervalInMs;
+                _sampler = new UserModeSampler(intervalMs);
+                _sampler.Start(processList.Select(x => x.Id));
+
+                session.EnableProvider(ClrTraceEventParser.ProviderGuid, TraceEventLevel.Verbose, (ulong)ClrEvents, options);
+
+                ProfilerClock.Restart();
                 return Task.CompletedTask;
             }
         };

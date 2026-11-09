@@ -5,7 +5,7 @@
 > ____
 > 🚨 The profiler **requires to run from an elevated prompt with administrative rights** 🚨 
 >
-> _This is required to allow to collect full stack traces, including kernel and native functions._
+> _This is required to allow to collect full stack traces, including kernel and native functions. Without it, ultra falls back to a user-mode sampler (`--user-mode-sampling`), without kernel stacks._
 > ____
 
 Example: open a **terminal with administrative rights**, to profile an executable called `my_commands.exe`:
@@ -141,7 +141,7 @@ Available commands:
 
 ### Profile
 
-This is the main command to profile an application - Only working within an elevated prompt:
+This is the main command to profile an application. Without an elevated prompt, it uses user-mode sampling (see `--user-mode-sampling` and the main readme):
 
 ```console
 Usage: ultra profile [Options] <pid | -- execName arg0 arg1...>
@@ -160,6 +160,12 @@ Usage: ultra profile [Options] <pid | -- execName arg0 arg1...>
                                       as many captures as you want before quitting.
       --delay=VALUE                 Starts profiling after a specific delay (seconds). Default is 0s.
       --duration=VALUE              Run the profiler for a maximum duration (seconds). Default is 120s
+      --user-mode-sampling          Sample the threads of the profiled process from ultra itself (suspend, read the
+                                      stack, walk it) instead of with the kernel ETW session, so that administrator
+                                      rights are not needed - only the right to start a user ETW session (e.g. as a
+                                      member of the Performance Log Users group). Windows x64 only; no kernel stacks
+                                      or context switches; the default sampling interval is 1.0ms. Used
+                                      automatically when ultra is not running elevated.
       --keep-merged-etl-file        Merge the kernel, user and rundown ETL files into one ETL file and keep it.
                                       Without it, the session files are converted directly and no merged file
                                       is produced.

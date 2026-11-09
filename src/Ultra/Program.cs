@@ -23,6 +23,7 @@ internal class Program
         List<int> pidList = new();
 
         bool verbose = false;
+        bool samplingIntervalSet = false;
         var options = new UltraProfilerOptions();
 
         const string _ = "";
@@ -43,11 +44,12 @@ internal class Program
                 new HelpOption(),
                 { "o|output=", "The base output {FILE} name. Default is ultra_<process_name>_yyyy-MM-dd_HH_mm_ss.", v => options.BaseOutputFileName = v },
                 { "pid=", "The {PID} of the process to attach the profiler to.", (int pid) => { pidList.Add(pid); } },
-                { "sampling-interval=", $"The {{VALUE}} of the sample interval in ms. Default is {options.CpuSamplingIntervalInMs:0.000}ms{(OperatingSystem.IsWindows() ? " (8190Hz)" : ", minimum is 1ms on macOS")}.", (float v) => options.CpuSamplingIntervalInMs  = v },
+                { "sampling-interval=", $"The {{VALUE}} of the sample interval in ms. Default is {options.CpuSamplingIntervalInMs:0.000}ms{(OperatingSystem.IsWindows() ? " (8190Hz)" : ", minimum is 1ms on macOS")}.", (float v) => { options.CpuSamplingIntervalInMs = v; samplingIntervalSet = true; } },
                 { "symbol-path=", $"The {{VALUE}} of symbol path. The default value is `{options.GetCachedSymbolPath()}`.", v => options.SymbolPathText  = v },
                 { "paused", "Launch the profiler paused and wait for SPACE or ENTER to start profiling. While profiling, press S to stop and save that capture and wait for a new one, or Q to stop and quit. You can start/stop as many captures as you want before quitting.", v => options.Paused = v is not null },
                 { "delay=", $"Starts profiling after a specific delay (seconds). Default is {options.DelayInSeconds}s.", (double delay) => options.DelayInSeconds = delay },
                 { "duration=", $"Run the profiler for a maximum duration (seconds). Default is {options.DurationInSeconds}s", (double duration) => options.DurationInSeconds = duration },
+                { "user-mode-sampling", $"Sample the threads of the profiled process from ultra itself (suspend, read the stack, walk it) instead of with the kernel ETW session, so that administrator rights are not needed - only the right to start a user ETW session (e.g. as a member of the Performance Log Users group). Windows x64 only; no kernel stacks or context switches; the default sampling interval is {UltraProfilerOptions.UserModeSamplingDefaultIntervalInMs:0.0}ms. Used automatically when ultra is not running elevated.", v => options.UserModeSampling = v is not null },
                 { "keep-merged-etl-file", "Merge the kernel, user and rundown ETL files into one ETL file and keep it. Without it, the session files are converted directly and no merged file is produced.", v => options.KeepMergedEtl = v is not null },
                 { "keep-intermediate-etl-files", "Keep the kernel, user and rundown ETL files of the session.", v => options.KeepEtlIntermediateFiles = v is not null },
                 { "mode=", "Defines how the stdout/stderr of a program explicitly started by ultra should be integrated in its output. Default is `silent` which will not mix program's output. The other options are: `raw` is going to mix ultra and program output together in a raw output. `live` is going to mix ultra and program output within a live table.", v =>
@@ -76,7 +78,26 @@ internal class Program
                         return 1;
                     }
 
-                    if (!UltraProfiler.IsElevated())
+                    if (OperatingSystem.IsWindows() && !options.UserModeSampling && !UltraProfiler.IsElevated())
+                    {
+                        AnsiConsole.MarkupLine("[darkorange]Not running with administrator rights: using user-mode sampling (--user-mode-sampling) instead of the kernel ETW session[/]");
+                        options.UserModeSampling = true;
+                    }
+
+                    if (options.UserModeSampling)
+                    {
+                        if (!OperatingSystem.IsWindows() || System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture != System.Runtime.InteropServices.Architecture.X64)
+                        {
+                            AnsiConsole.MarkupLine("[red]--user-mode-sampling is only supported on Windows x64[/]");
+                            return 1;
+                        }
+
+                        if (!samplingIntervalSet)
+                        {
+                            options.CpuSamplingIntervalInMs = UltraProfilerOptions.UserModeSamplingDefaultIntervalInMs;
+                        }
+                    }
+                    else if (!UltraProfiler.IsElevated())
                     {
                         AnsiConsole.MarkupLine("[darkorange]This command requires to run with administrator rights[/]");
                         return 1;
