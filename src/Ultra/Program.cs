@@ -24,6 +24,8 @@ internal class Program
 
         bool verbose = false;
         bool samplingIntervalSet = false;
+        string? controlPipeName = null;
+        double controlTimeout = 600;
         var options = new UltraProfilerOptions();
 
         const string _ = "";
@@ -47,6 +49,7 @@ internal class Program
                 { "sampling-interval=", $"The {{VALUE}} of the sample interval in ms. Default is {options.CpuSamplingIntervalInMs:0.000}ms{(OperatingSystem.IsWindows() ? " (8190Hz)" : ", minimum is 1ms on macOS")}.", (float v) => { options.CpuSamplingIntervalInMs = v; samplingIntervalSet = true; } },
                 { "symbol-path=", $"The {{VALUE}} of symbol path. The default value is `{options.GetCachedSymbolPath()}`.", v => options.SymbolPathText  = v },
                 { "paused", "Launch the profiler paused and wait for SPACE or ENTER to start profiling. While profiling, press S to stop and save that capture and wait for a new one, or Q to stop and quit. You can start/stop as many captures as you want before quitting.", v => options.Paused = v is not null },
+                { "control-pipe=", "Like --paused, but captures can also be started and stopped from another process with `ultra control {NAME} start|stop|wait|status|quit`. --duration still caps each capture.", v => { controlPipeName = v; options.Paused = true; } },
                 { "delay=", $"Starts profiling after a specific delay (seconds). Default is {options.DelayInSeconds}s.", (double delay) => options.DelayInSeconds = delay },
                 { "duration=", $"Run the profiler for a maximum duration (seconds). Default is {options.DurationInSeconds}s", (double duration) => options.DurationInSeconds = duration },
                 { "user-mode-sampling", $"Sample the threads of the profiled process from ultra itself (suspend, read the stack, walk it) instead of with the kernel ETW session, so that administrator rights are not needed - only the right to start a user ETW session (e.g. as a member of the Performance Log Users group). Windows x64 only; no kernel stacks or context switches; the default sampling interval is {UltraProfilerOptions.UserModeSamplingDefaultIntervalInMs:0.0}ms. Used automatically when ultra is not running elevated.", v => options.UserModeSampling = v is not null },
@@ -144,19 +147,48 @@ internal class Program
                     {
                         var board = new CaptureBoard();
 
-                        options.CaptureStarted = board.CaptureStarted;
-                        options.CaptureSaving = board.CaptureSaving;
-                        options.CaptureStatusChanged = board.StatusChanged;
-                        options.CaptureCompleted = board.Completed;
-                        options.CaptureFailed = board.Failed;
+                        // The live board needs a real console, so a session whose output is redirected
+                        // (e.g. one driven through --control-pipe from a script) logs plain lines instead.
+                        bool plainLog = Console.IsOutputRedirected;
+                        if (plainLog)
+                        {
+                            options.CaptureStarted = i => Console.WriteLine($"Capture {i}: profiling");
+                            options.CaptureSaving = i => Console.WriteLine($"Capture {i}: saving");
+                            options.CaptureCompleted = (i, path) => Console.WriteLine($"Capture {i}: saved {path}");
+                            options.CaptureFailed = (i, ex) => Console.WriteLine($"Capture {i}: failed {ex.Message}");
+                            if (verbose)
+                            {
+                                options.CaptureStatusChanged = (i, text) => Console.WriteLine($"Capture {i}: {text}");
+                            }
+                        }
+                        else
+                        {
+                            options.CaptureStarted = board.CaptureStarted;
+                            options.CaptureSaving = board.CaptureSaving;
+                            options.CaptureStatusChanged = board.StatusChanged;
+                            options.CaptureCompleted = board.Completed;
+                            options.CaptureFailed = board.Failed;
+                        }
 
                         if (options.ConsoleMode != UltraProfilerConsoleMode.Silent)
                         {
-                            options.ProgramLogStdout = board.LogText;
-                            options.ProgramLogStderr = board.LogText;
+                            options.ProgramLogStdout = plainLog ? Console.WriteLine : board.LogText;
+                            options.ProgramLogStderr = plainLog ? Console.WriteLine : board.LogText;
                         }
 
-                        options.ShouldStartProfiling = () =>
+                        var controlPipe = controlPipeName is not null ? new ControlPipe(controlPipeName) : null;
+                        bool keyboard = !Console.IsInputRedirected;
+                        if (controlPipe is not null)
+                        {
+                            options.CaptureStarted = Chain(options.CaptureStarted, controlPipe.CaptureStarted);
+                            options.CaptureSaving = Chain(options.CaptureSaving, controlPipe.CaptureSaving);
+                            options.CaptureCompleted = Chain(options.CaptureCompleted, controlPipe.CaptureCompleted);
+                            options.CaptureFailed = Chain(options.CaptureFailed, controlPipe.CaptureFailed);
+                            controlPipe.Start();
+                            AnsiConsole.MarkupLine($"[green]Waiting for commands on pipe {Markup.Escape(controlPipeName!)}: ultra control {Markup.Escape(controlPipeName!)} start|stop|wait|status|quit[/]");
+                        }
+
+                        Func<bool> waitForKeyStart = () =>
                         {
                             // Re-armed on every wait (a Paused session can wait for a start several times),
                             // so that CTRL+C keeps being readable as a key here instead of raising CancelKeyPress.
@@ -180,8 +212,35 @@ internal class Program
                             return startProfiling;
                         };
 
+                        options.ShouldStartProfiling = () =>
+                        {
+                            if (controlPipe is null)
+                            {
+                                return waitForKeyStart();
+                            }
+
+                            if (controlPipe.TryTakeStart(TimeSpan.FromMilliseconds(100)))
+                            {
+                                return true;
+                            }
+
+                            if (controlPipe.QuitRequested)
+                            {
+                                etwProfiler.Cancel();
+                                return false;
+                            }
+
+                            return keyboard && Console.KeyAvailable && waitForKeyStart();
+                        };
+
                         options.PollProfilingControlAction = () =>
                         {
+                            var pipeAction = controlPipe?.Poll() ?? ProfilingControlAction.None;
+                            if (pipeAction != ProfilingControlAction.None)
+                            {
+                                return pipeAction;
+                            }
+
                             if (Console.IsInputRedirected || !Console.KeyAvailable)
                             {
                                 return ProfilingControlAction.None;
@@ -191,20 +250,32 @@ internal class Program
                             return ProfilingControlKeyMapper.Map(key.Key, key.Modifiers);
                         };
 
-                        await AnsiConsole.Live(board.Display)
-                            .StartAsync(async liveCtx =>
+                        async Task RunPaused()
+                        {
+                            try
                             {
-                                board.Attach(liveCtx);
+                                jsonGzOutput = await etwProfiler.Run(options);
+                            }
+                            finally
+                            {
+                                etwProfiler.Dispose();
+                                controlPipe?.Dispose();
+                            }
+                        }
 
-                                try
+                        if (plainLog)
+                        {
+                            await RunPaused();
+                        }
+                        else
+                        {
+                            await AnsiConsole.Live(board.Display)
+                                .StartAsync(async liveCtx =>
                                 {
-                                    jsonGzOutput = await etwProfiler.Run(options);
-                                }
-                                finally
-                                {
-                                    etwProfiler.Dispose();
-                                }
-                            });
+                                    board.Attach(liveCtx);
+                                    await RunPaused();
+                                });
+                        }
                     }
                     else if (options.ConsoleMode == UltraProfilerConsoleMode.Silent)
                     {
@@ -368,6 +439,24 @@ internal class Program
                     return 0;
                 }
             },
+            new Command("control", "Send a command to a profiling session started with --control-pipe")
+            {
+                new CommandUsage("Usage: {NAME} [Options] <pipe-name> <start|stop|wait|status|quit>"),
+                _,
+                new HelpOption(),
+                { "timeout=", $"How long to wait for the reply, in seconds (stop and wait reply once the capture is saved). Default is {controlTimeout}s.", (double v) => controlTimeout = v },
+                { "<>", "The pipe name and the command" },
+                async (ctx, arguments) =>
+                {
+                    if (arguments.Length != 2)
+                    {
+                        AnsiConsole.MarkupLine("[red]Expected a pipe name and a command[/]");
+                        return 1;
+                    }
+
+                    return await ControlPipe.SendAsync(arguments[0], arguments[1], TimeSpan.FromSeconds(controlTimeout));
+                }
+            },
             new Command("convert", "Convert an existing trace (one or more ETL files, or a list of nettrace files) to a Firefox Profiler json file")
             {
                 new CommandUsage("Usage: {NAME} --pid xxx [<trace.etl> [<more.etl>...] | <file1_sampler.nettrace> <file1_clr.nettrace>]"),
@@ -505,6 +594,10 @@ internal class Program
         }
     }
     
+    private static Action<T> Chain<T>(Action<T>? first, Action<T> second) => first is null ? second : x => { first(x); second(x); };
+
+    private static Action<T1, T2> Chain<T1, T2>(Action<T1, T2>? first, Action<T1, T2> second) => first is null ? second : (x, y) => { first(x, y); second(x, y); };
+
     private class StatusTable
     {
         private string? _statusText;

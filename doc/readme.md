@@ -139,6 +139,25 @@ Available commands:
   convert                           Convert an existing ETL file to a Firefox Profiler json file
 ```
 
+### Control
+
+Sends a command to a session started with `ultra profile --control-pipe NAME`, so that a script can take captures of a
+running process whenever it wants. Each command prints one reply line starting with `ok` or `error` (exit code 0 or 1):
+
+```console
+Usage: ultra control [Options] <pipe-name> <start|stop|wait|status|quit>
+
+      --timeout=VALUE               How long to wait for the reply, in seconds. Default is 600s.
+```
+
+- `start` starts a capture and replies `ok started <index>` once it is profiling.
+- `stop` stops the current capture and replies `ok <index> <file>` once it is saved.
+- `wait` waits for the current (or last) capture to end, e.g. at `--duration`, and replies like `stop`.
+- `status` replies `ok profiling <index>` or `ok idle <last index>`.
+- `quit` ends the session (saving a capture that is still profiling).
+
+When ultra's output is redirected, a paused session logs one line per capture event instead of the live table.
+
 ### Profile
 
 This is the main command to profile an application. Without an elevated prompt, it uses user-mode sampling (see `--user-mode-sampling` and the main readme):
@@ -158,6 +177,9 @@ Usage: ultra profile [Options] <pid | -- execName arg0 arg1...>
                                       profiling. While profiling, press S to stop and save that capture
                                       and wait for a new one, or Q to stop and quit. You can start/stop
                                       as many captures as you want before quitting.
+      --control-pipe=NAME           Like --paused, but captures can also be started and stopped from another
+                                      process with `ultra control NAME start|stop|wait|status|quit`. --duration
+                                      still caps each capture.
       --delay=VALUE                 Starts profiling after a specific delay (seconds). Default is 0s.
       --duration=VALUE              Run the profiler for a maximum duration (seconds). Default is 120s
       --user-mode-sampling          Sample the threads of the profiled process from ultra itself (suspend, read the
