@@ -20,6 +20,12 @@ internal class Program
         Console.InputEncoding = Encoding.UTF8;
         Console.OutputEncoding = Encoding.UTF8;
 
+        // Symbol server lookups (TraceEvent's SymbolReader) block thread pool threads while they download, many at a
+        // time, while a Paused session keeps profiling the next capture on the pool. Start with enough threads that
+        // a slow symbol server cannot starve the profiling loop while the pool slowly injects more.
+        ThreadPool.GetMinThreads(out var minWorkerThreads, out var minIoThreads);
+        ThreadPool.SetMinThreads(Math.Max(minWorkerThreads, Environment.ProcessorCount + 64), minIoThreads);
+
         List<int> pidList = new();
 
         bool verbose = false;
@@ -108,7 +114,12 @@ internal class Program
 
                     string? jsonGzOutput = null;
 
-                    
+                    // ETW sessions outlive their process: stop the ones an ultra that was killed left recording.
+                    foreach (var message in UltraProfiler.StopOrphanedSessions())
+                    {
+                        AnsiConsole.MarkupLine($"[darkorange]{Markup.Escape(message)}[/]");
+                    }
+
                     // Add the pid passed as options
                     options.ProcessIds.AddRange(pidList);
 

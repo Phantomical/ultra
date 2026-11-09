@@ -199,6 +199,14 @@ Usage: ultra profile [Options] <pid | -- execName arg0 arg1...>
                                       within a live table.
 ```
 
+ETW sessions keep recording after the process that started them exits, so ultra stops its sessions when its console is
+closed or when CTRL+C is pressed twice, and `ultra profile` first stops any session left running by an ultra process
+that was killed. Sessions started by an older ultra cannot be traced back to their process: they are stopped only when
+no other ultra is running, otherwise ultra prints the `logman stop <name> -ets` command to stop them by hand.
+
+A symbol server lookup (PDB download included) is abandoned after 3 minutes, leaving that module unresolved, so that a
+stalled download cannot hang the conversion.
+
 #### Capturing multiple profiles in one paused session
 
 With `--paused`, you don't have to exit ultra to capture more than one profile, and you don't have to

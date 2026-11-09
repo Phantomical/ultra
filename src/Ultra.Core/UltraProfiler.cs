@@ -84,8 +84,14 @@ public abstract class UltraProfiler : IDisposable
             // Make sure that we cancel any pending operations
             _cancellationTokenSource.Cancel();
 
-            // Before really canceling, wait for the clean cancel to be done
-            WaitForCleanCancel();
+            // Before really canceling, wait for the clean cancel to be done. If the profiling loop does not get there
+            // (e.g. it is starved by a hung capture save), stop the sessions here: whatever happens to the process
+            // next, nothing must be left recording.
+            if (!WaitForCleanCancel(CleanCancelTimeout))
+            {
+                EmergencyStop();
+            }
+
             return true;
         }
     }
@@ -105,6 +111,37 @@ public abstract class UltraProfiler : IDisposable
     }
 
     private protected abstract void DisposeImpl();
+
+    /// <summary>
+    /// How long a second cancel request waits for the profiling loop to stop its sessions cleanly before
+    /// <see cref="EmergencyStop"/> stops them.
+    /// </summary>
+    internal static readonly TimeSpan CleanCancelTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Stops whatever is recording, from any thread, without waiting for the profiling loop. Called when a cancel
+    /// request could not be completed cleanly.
+    /// </summary>
+    private protected virtual void EmergencyStop()
+    {
+    }
+
+    /// <summary>
+    /// Stops the profiling sessions that ultra processes which have since exited left running. On Windows, an ETW
+    /// session outlives the process that started it, so a capture whose ultra process was killed or had its console
+    /// closed keeps recording (system-wide, for a kernel session) until it is stopped. Does nothing on other platforms.
+    /// </summary>
+    /// <returns>A message for each leftover session stopped, or found but left running because it could not be stopped
+    /// or its owner could not be determined.</returns>
+    public static IReadOnlyList<string> StopOrphanedSessions()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return UltraProfilerEtw.StopOrphanedEtwSessions();
+        }
+
+        return [];
+    }
 
     /// <summary>
     /// Determines whether the current process is running with elevated privileges.
@@ -392,15 +429,20 @@ public abstract class UltraProfiler : IDisposable
 
                 // Save (rundown/merge/convert) this capture. In Paused mode this runs in the background so
                 // that the next capture can start profiling right away; otherwise it is awaited immediately.
+                // The background save is started on the thread pool: a save can run synchronously for its
+                // whole duration (the conversion is synchronous, and the user-mode runner has nothing to
+                // await before it), which would otherwise block this loop until the capture is saved.
                 var pidsSnapshot = processList.Select(x => x.Id).ToList();
-                var saveTask = SaveCaptureAsync(runner, baseName, pidsSnapshot, thisCaptureIndex, cycleOptions, ultraProfilerOptions);
                 if (cycleOptions.Paused)
                 {
-                    pendingSaves.Add(saveTask);
+                    var saveRunner = runner;
+                    var saveBaseName = baseName;
+                    var saveOptions = cycleOptions;
+                    pendingSaves.Add(Task.Run(() => SaveCaptureAsync(saveRunner, saveBaseName, pidsSnapshot, thisCaptureIndex, saveOptions, ultraProfilerOptions)));
                 }
                 else
                 {
-                    lastJsonFinalFile = await saveTask ?? lastJsonFinalFile;
+                    lastJsonFinalFile = await SaveCaptureAsync(runner, baseName, pidsSnapshot, thisCaptureIndex, cycleOptions, ultraProfilerOptions) ?? lastJsonFinalFile;
                 }
 
                 if (!PausedSessionPlanner.ShouldWaitForAnotherCapture(ultraProfilerOptions.Paused, cycleControlAction, CancelRequested, allProcessesExitedThisCycle))
@@ -703,14 +745,22 @@ public abstract class UltraProfiler : IDisposable
         return state;
     }
 
-    private void WaitForCleanCancel()
+    private bool WaitForCleanCancel(TimeSpan timeout)
     {
-        if (CleanCancel is not null)
+        if (CleanCancel is not { } cleanCancel)
         {
-            CleanCancel.WaitOne();
-            CleanCancel.Dispose();
-            CleanCancel = null;
+            return true;
         }
+
+        if (!cleanCancel.WaitOne(timeout))
+        {
+            // Left to the profiling loop, which may still set it, and to Dispose.
+            return false;
+        }
+
+        cleanCancel.Dispose();
+        CleanCancel = null;
+        return true;
     }
 
     private protected class ProfilerRunner(string baseFileName)

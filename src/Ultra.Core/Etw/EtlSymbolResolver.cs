@@ -20,6 +20,13 @@ internal sealed class EtlSymbolResolver
     // Concurrent lookups allowed against any one remote symbol server. Local elements are not throttled.
     private const int MaxConcurrentLookupsPerSymbolServer = 32;
 
+    /// <summary>
+    /// How long one PDB lookup against a remote symbol server may take, download included. SymbolReader only times
+    /// out a server that does not answer: once the response headers arrive it waits for the download to complete,
+    /// forever if the transfer stalls, which used to hang the whole conversion.
+    /// </summary>
+    internal static readonly TimeSpan SymbolServerLookupTimeout = TimeSpan.FromMinutes(3);
+
     private readonly EtlTraceModel _model;
     private readonly string _symbolPathText;
     private readonly int _maxDegreeOfParallelism;
@@ -491,38 +498,31 @@ internal sealed class EtlSymbolResolver
             {
                 var file = work.File;
                 string? path = null;
+                var timedOut = false;
                 foreach (var server in servers)
                 {
-                    using (var lease = await server.AcquireAsync().ConfigureAwait(false))
-                    {
-                        var reader = lease.Reader;
-                        path = await Task.Run(() =>
-                        {
-                            try
-                            {
-                                return reader.FindSymbolFilePath(file.PdbName, file.PdbSignature, file.PdbAge, file.FilePath, file.ProductVersion, portablePdbMatch: true);
-                            }
-                            catch
-                            {
-                                return null;
-                            }
-                        }).ConfigureAwait(false);
-                    }
-
+                    var result = await server.LookupAsync(
+                        reader => reader.FindSymbolFilePath(file.PdbName, file.PdbSignature, file.PdbAge, file.FilePath, file.ProductVersion, portablePdbMatch: true),
+                        SymbolServerLookupTimeout).ConfigureAwait(false);
+                    path = result.Path;
+                    timedOut |= result.TimedOut;
                     if (path is not null)
                     {
                         break;
                     }
                 }
 
-                if (path is null)
+                // A lookup that timed out says nothing about whether the PDB is published: it is retried next time.
+                if (path is null && !timedOut)
                 {
                     negativeCache.RecordMissing(NegativeSymbolCache.MakeKey(file.PdbName, file.PdbSignature, file.PdbAge));
                 }
 
                 work.PdbPath = path;
                 var done = Interlocked.Increment(ref queried);
-                ReportProgress($"Querying Symbol Servers [{done}/{toQuery.Count}] for Module `{file.Name}`");
+                ReportProgress(path is null && timedOut
+                    ? $"Querying Symbol Servers [{done}/{toQuery.Count}] for Module `{file.Name}` - timed out after {SymbolServerLookupTimeout.TotalSeconds:0}s, left unresolved"
+                    : $"Querying Symbol Servers [{done}/{toQuery.Count}] for Module `{file.Name}`");
             }
 
             var lookups = new Task[toQuery.Count];
@@ -588,27 +588,65 @@ internal sealed class EtlSymbolResolver
     }
 
     /// <summary>
-    /// A single remote symbol server, limited to <see cref="MaxConcurrentLookupsPerSymbolServer"/> concurrent
-    /// lookups, each with a <see cref="SymbolReader"/> of its own.
+    /// A single remote symbol server, limited to <paramref name="maxConcurrentLookups"/> concurrent lookups, each
+    /// with a <see cref="SymbolReader"/> of its own.
     /// </summary>
-    private sealed class ThrottledSymbolServer : IDisposable
+    internal sealed class ThrottledSymbolServer(string symbolPathText, int maxConcurrentLookups = MaxConcurrentLookupsPerSymbolServer) : IDisposable
     {
-        private readonly SemaphoreSlim _semaphore = new(MaxConcurrentLookupsPerSymbolServer);
+        private readonly SemaphoreSlim _semaphore = new(maxConcurrentLookups);
         private readonly ConcurrentBag<SymbolReader> _readers = [];
 
-        public ThrottledSymbolServer(string symbolPathText)
-        {
-            for (var i = 0; i < MaxConcurrentLookupsPerSymbolServer; i++)
-            {
-                _readers.Add(CreateSymbolReader(symbolPathText));
-            }
-        }
+        /// <summary>The result of <see cref="LookupAsync"/>: the path found, if any, and whether the lookup timed out.</summary>
+        public readonly record struct LookupResult(string? Path, bool TimedOut);
 
-        public async ValueTask<Lease> AcquireAsync()
+        /// <summary>
+        /// Runs <paramref name="lookup"/> with one of the server's readers, giving up after <paramref name="timeout"/>.
+        /// A lookup that throws finds nothing. A lookup that times out is abandoned with its reader (a reader is not
+        /// thread safe, and SymbolReader has no way to cancel a download) and the slot is released for the next one.
+        /// </summary>
+        public async Task<LookupResult> LookupAsync(Func<SymbolReader, string?> lookup, TimeSpan timeout)
         {
             await _semaphore.WaitAsync().ConfigureAwait(false);
-            _readers.TryTake(out var reader);
-            return new Lease(this, reader!);
+            if (!_readers.TryTake(out var reader))
+            {
+                reader = CreateSymbolReader(symbolPathText);
+            }
+
+            // On a thread of its own rather than the thread pool: SymbolReader blocks on its download, and up to
+            // MaxConcurrentLookupsPerSymbolServer lookups blocking pool threads starve every other user of the pool,
+            // including the profiling loop of a capture that started while this one is being saved.
+            var task = Task.Factory.StartNew(
+                () =>
+                {
+                    try
+                    {
+                        return lookup(reader);
+                    }
+                    catch
+                    {
+                        return null;
+                    }
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+
+            try
+            {
+                var path = await task.WaitAsync(timeout).ConfigureAwait(false);
+                _readers.Add(reader);
+                return new LookupResult(path, false);
+            }
+            catch (TimeoutException)
+            {
+                // The reader stays with the hung lookup; disposed (best effort) if the lookup ever ends.
+                _ = task.ContinueWith(_ => reader.Dispose(), CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                return new LookupResult(null, true);
+            }
+            finally
+            {
+                _semaphore.Release();
+            }
         }
 
         public void Dispose()
@@ -619,18 +657,6 @@ internal sealed class EtlSymbolResolver
             }
 
             _semaphore.Dispose();
-        }
-
-        /// <summary>Holds one of the server's readers until disposed.</summary>
-        public readonly struct Lease(ThrottledSymbolServer server, SymbolReader reader) : IDisposable
-        {
-            public SymbolReader Reader => reader;
-
-            public void Dispose()
-            {
-                server._readers.Add(reader);
-                server._semaphore.Release();
-            }
         }
     }
 }

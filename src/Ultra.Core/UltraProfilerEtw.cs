@@ -2,6 +2,7 @@
 // Licensed under the BSD-Clause 2 license.
 // See license.txt file in the project root for full license information.
 
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using ByteSizeLib;
@@ -9,6 +10,7 @@ using Microsoft.Diagnostics.Tracing;
 using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Parsers.Clr;
 using Microsoft.Diagnostics.Tracing.Session;
+using Ultra.Core.Etw;
 using Ultra.Core.Etw.UserMode;
 
 namespace Ultra.Core;
@@ -23,11 +25,24 @@ internal sealed class UltraProfilerEtw : UltraProfiler
     private TraceEventSession? _kernelSession;
     private UserModeSampler? _sampler;
 
+    // Every ETW session this profiler has started and not yet disposed, including the rundown session of a capture
+    // saving in the background, so that they can all be stopped if ultra is about to die (see StopLiveSessions).
+    private readonly ConcurrentDictionary<TraceEventSession, byte> _liveSessions = new();
+    private readonly PosixSignalRegistration[] _signalRegistrations;
+
     /// <summary>
     /// Initializes a new instance of the <see cref="UltraProfiler"/> class.
     /// </summary>
     internal UltraProfilerEtw()
     {
+        // ETW sessions outlive their process: when the console window is closed (SIGHUP is CTRL_CLOSE_EVENT on
+        // Windows) or the user logs off or shuts down (SIGTERM), stop them before the process is terminated, or a
+        // kernel session keeps logging the whole system to disk. CTRL+C goes through Cancel() instead.
+        _signalRegistrations =
+        [
+            PosixSignalRegistration.Create(PosixSignal.SIGHUP, _ => StopLiveSessions()),
+            PosixSignalRegistration.Create(PosixSignal.SIGTERM, _ => StopLiveSessions()),
+        ];
     }
 
     private protected override void DisposeImpl()
@@ -36,14 +51,133 @@ internal sealed class UltraProfilerEtw : UltraProfiler
         _sampler = null;
 
         DisposeSessions();
+        StopLiveSessions();
+
+        foreach (var registration in _signalRegistrations)
+        {
+            registration.Dispose();
+        }
+    }
+
+    private protected override void EmergencyStop()
+    {
+        try { _sampler?.Stop(); } catch { /* ignore */ }
+        StopLiveSessions();
+    }
+
+    /// <summary>Stops every ETW session of this profiler that is still running. Safe to call from any thread.</summary>
+    private void StopLiveSessions()
+    {
+        foreach (var session in _liveSessions.Keys)
+        {
+            try { session.Stop(noThrow: true); } catch { /* ignore */ }
+            _liveSessions.TryRemove(session, out _);
+        }
+    }
+
+    /// <summary>Creates an ETW session of a capture, named so that it can be recognized if it leaks (see <see cref="EtwSessionNames"/>).</summary>
+    private TraceEventSession CreateSession(string baseName, string kind, string fileName)
+    {
+        var session = new TraceEventSession(EtwSessionNames.Create(baseName, kind), fileName);
+        _liveSessions[session] = 0;
+        return session;
+    }
+
+    private void DisposeSession(TraceEventSession? session)
+    {
+        if (session is null)
+        {
+            return;
+        }
+
+        // Dispose stops the OS-level ETW session (StopOnDispose is true)
+        try { session.Dispose(); } catch { /* ignore */ }
+        _liveSessions.TryRemove(session, out _);
+    }
+
+    /// <summary>
+    /// Stops the ETW sessions that ultra processes which have exited left running (see <see cref="EtwSessionNames"/>).
+    /// </summary>
+    /// <returns>A message for each session stopped, or found but left running.</returns>
+    internal static List<string> StopOrphanedEtwSessions()
+    {
+        var messages = new List<string>();
+        List<string> names;
+        try
+        {
+            names = TraceEventSession.GetActiveSessionNames();
+        }
+        catch (Exception)
+        {
+            return messages;
+        }
+
+        var ownPid = Environment.ProcessId;
+        var otherUltraIsRunning = new Lazy<bool>(() => IsOtherUltraRunning(ownPid));
+        foreach (var name in names)
+        {
+            var ownership = EtwSessionNames.Classify(name, GetProcessName, () => otherUltraIsRunning.Value);
+            switch (ownership)
+            {
+                case EtwSessionNames.Ownership.Orphaned:
+                    try
+                    {
+                        using var session = TraceEventSession.GetActiveSession(name);
+                        if (session is not null)
+                        {
+                            session.Stop();
+                            messages.Add($"Stopped ETW session `{name}` left running by an ultra process that has exited");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        messages.Add($"Unable to stop ETW session `{name}` left running by an ultra process that has exited ({ex.Message}). Stop it from an elevated prompt with: logman stop \"{name}\" -ets");
+                    }
+
+                    break;
+                case EtwSessionNames.Ownership.LegacyUnknown:
+                    messages.Add($"ETW session `{name}` was started by an older ultra and another ultra is running. If it is left over, stop it from an elevated prompt with: logman stop \"{name}\" -ets");
+                    break;
+            }
+        }
+
+        return messages;
+
+        static string? GetProcessName(int pid)
+        {
+            try
+            {
+                using var process = Process.GetProcessById(pid);
+                return process.ProcessName;
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+            catch (InvalidOperationException)
+            {
+                return null;
+            }
+        }
+
+        static bool IsOtherUltraRunning(int ownPid)
+        {
+            var found = false;
+            foreach (var process in Process.GetProcessesByName("ultra"))
+            {
+                found |= process.Id != ownPid;
+                process.Dispose();
+            }
+
+            return found;
+        }
     }
 
     private void DisposeSessions()
     {
-        // Dispose stops the OS-level ETW sessions (StopOnDispose is true)
-        try { _userSession?.Dispose(); } catch { /* ignore */ }
+        DisposeSession(_userSession);
         _userSession = null;
-        try { _kernelSession?.Dispose(); } catch { /* ignore */ }
+        DisposeSession(_kernelSession);
         _kernelSession = null;
     }
 
@@ -103,8 +237,8 @@ internal sealed class UltraProfilerEtw : UltraProfiler
                     options.ProcessNameFilter = [Path.GetFileName(ultraProfilerOptions.ProgramPath)];
                 }
 
-                _userSession = new TraceEventSession($"{baseName}-user", userFileName);
-                _kernelSession = new TraceEventSession($"{baseName}-kernel", kernelFileName);
+                _userSession = CreateSession(baseName, "user", userFileName);
+                _kernelSession = CreateSession(baseName, "kernel", kernelFileName);
 
                 return Task.CompletedTask;
             },
@@ -247,7 +381,19 @@ internal sealed class UltraProfilerEtw : UltraProfiler
 
     private async Task RunClrRundown(string baseFileName, string rundownFileName, TraceEventProviderOptions options, UltraProfilerOptions ultraProfilerOptions)
     {
-        using TraceEventSession clrRundownSession = new TraceEventSession($"{baseFileName}-rundown", rundownFileName);
+        var clrRundownSession = CreateSession(baseFileName, "rundown", rundownFileName);
+        try
+        {
+            await RunClrRundown(clrRundownSession, rundownFileName, options, ultraProfilerOptions).ConfigureAwait(false);
+        }
+        finally
+        {
+            DisposeSession(clrRundownSession);
+        }
+    }
+
+    private async Task RunClrRundown(TraceEventSession clrRundownSession, string rundownFileName, TraceEventProviderOptions options, UltraProfilerOptions ultraProfilerOptions)
+    {
         clrRundownSession.StopOnDispose = true;
         clrRundownSession.CircularBufferMB = 0;
 
@@ -319,7 +465,7 @@ internal sealed class UltraProfilerEtw : UltraProfiler
                     options.ProcessNameFilter = [Path.GetFileName(ultraProfilerOptions.ProgramPath)];
                 }
 
-                _userSession = new TraceEventSession($"{baseName}-user", userFileName);
+                _userSession = CreateSession(baseName, "user", userFileName);
                 return Task.CompletedTask;
             },
 
