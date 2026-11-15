@@ -8,10 +8,10 @@ using System.Globalization;
 namespace Ultra.Core;
 
 /// <summary>
-/// Tracks which PDBs were confirmed missing from every remote symbol server, so that
-/// <see cref="UltraConverterToFirefoxEtw"/> can skip the round trip to those servers for a PDB already
-/// known to be unpublished, until <see cref="Ttl"/> elapses and it is retried in case the symbol was
-/// published since. Entries are persisted to a file inside the on-disk symbol cache directory
+/// Tracks which PDBs were confirmed missing from which remote symbol server, so that the symbol resolution
+/// can skip the round trip to a server for a PDB it already said it does not publish, until <see cref="Ttl"/>
+/// elapses and it is retried in case the symbol was published since. A miss is remembered per server: adding
+/// a server to the symbol path makes it asked for the PDBs the other servers did not have. Entries are persisted to a file inside the on-disk symbol cache directory
 /// (<see cref="MakeKey"/> identifies a PDB independently of any particular trace or process), so the
 /// benefit carries across separate captures and separate <c>ultra</c> invocations on the same machine.
 /// </summary>
@@ -80,10 +80,14 @@ internal sealed class NegativeSymbolCache
     }
 
     /// <summary>
-    /// Builds the key identifying a PDB, matching the identity a symbol server lookup is made against.
+    /// Builds the key identifying a PDB on a symbol server: the identity a symbol server lookup is made against,
+    /// and the server (<see cref="Microsoft.Diagnostics.Symbols.SymbolPathElement.Target"/> of its symbol path
+    /// element) it was looked up on. The server is compared without case or trailing slash.
     /// </summary>
-    public static string MakeKey(string pdbName, Guid pdbSignature, int pdbAge) =>
-        $"{pdbSignature:N}|{pdbAge}|{pdbName}";
+    public static string MakeKey(string pdbName, Guid pdbSignature, int pdbAge, string server) =>
+        $"{pdbSignature:N}|{pdbAge}|{pdbName}|{NormalizeServer(server)}";
+
+    private static string NormalizeServer(string server) => server.Trim().TrimEnd('/', '\\').ToLowerInvariant();
 
     /// <summary>
     /// Returns <c>true</c> if <paramref name="key"/> was recorded missing within the last <see cref="Ttl"/>.
@@ -92,7 +96,7 @@ internal sealed class NegativeSymbolCache
         _missingSinceUtc.TryGetValue(key, out var recordedAtUtc) && DateTime.UtcNow - recordedAtUtc < Ttl;
 
     /// <summary>
-    /// Records that <paramref name="key"/> was just confirmed missing from every remote server.
+    /// Records that <paramref name="key"/> was just confirmed missing from its server.
     /// </summary>
     public void RecordMissing(string key) => _missingSinceUtc[key] = DateTime.UtcNow;
 

@@ -1299,8 +1299,8 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
     /// <remarks>
     /// A miss costs a round trip to every remote server on the symbol path, so these lookups dominate
     /// <see cref="LoadModules"/> on traces containing modules whose symbols are not published. A confirmed
-    /// miss is recorded in <see cref="NegativeSymbolCache"/>, so a PDB already known to be unpublished
-    /// skips the round trip entirely until its entry expires. A hit leaves the PDB in the shared cache,
+    /// miss is recorded per server in <see cref="NegativeSymbolCache"/>, so a server already known not to
+    /// publish a PDB is not asked again until its entry expires, while a server added to the path since is. A hit leaves the PDB in the shared cache,
     /// which every server element on the path checks before going out, so the serial pass then resolves it
     /// locally. This does I/O only and touches no <see cref="TraceLog"/> state.
     /// </remarks>
@@ -1416,8 +1416,8 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
         foreach (var i in uncached)
         {
             var moduleFile = pending[i];
-            var key = NegativeSymbolCache.MakeKey(moduleFile.PdbName, moduleFile.PdbSignature, moduleFile.PdbAge);
-            if (negativeCache.IsKnownMissing(key))
+            // Skipped only when every server of the symbol path is known not to have it.
+            if (remoteElements.All(element => negativeCache.IsKnownMissing(NegativeSymbolCache.MakeKey(moduleFile.PdbName, moduleFile.PdbSignature, moduleFile.PdbAge, element.Target))))
             {
                 withoutSymbols.Add(moduleFile.ModuleFileIndex);
                 ReportProgress("Skipping Known-Missing Symbols", moduleFile);
@@ -1457,9 +1457,15 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
             async Task<bool> IsOnAnyServerAsync(TraceModuleFile moduleFile)
             {
                 var found = false;
-                foreach (var server in servers)
+                for (var serverIndex = 0; serverIndex < servers.Count; serverIndex++)
                 {
-                    using (var lease = await server.AcquireAsync().ConfigureAwait(false))
+                    var key = NegativeSymbolCache.MakeKey(moduleFile.PdbName, moduleFile.PdbSignature, moduleFile.PdbAge, remoteElements[serverIndex].Target);
+                    if (negativeCache.IsKnownMissing(key))
+                    {
+                        continue;
+                    }
+
+                    using (var lease = await servers[serverIndex].AcquireAsync().ConfigureAwait(false))
                     {
                         var reader = lease.Reader;
                         found = await Task.Run(() => HasSymbols(reader, moduleFile)).ConfigureAwait(false);
@@ -1469,11 +1475,8 @@ internal class UltraConverterToFirefoxEtw : UltraConverterToFirefox
                     {
                         break;
                     }
-                }
 
-                if (!found)
-                {
-                    negativeCache.RecordMissing(NegativeSymbolCache.MakeKey(moduleFile.PdbName, moduleFile.PdbSignature, moduleFile.PdbAge));
+                    negativeCache.RecordMissing(key);
                 }
 
                 ReportProgress("Querying Symbol Servers", moduleFile);

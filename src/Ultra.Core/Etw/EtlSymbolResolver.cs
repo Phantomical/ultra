@@ -399,8 +399,8 @@ internal sealed class EtlSymbolResolver
 
     /// <summary>
     /// Finds the PDB of every module in <paramref name="works"/>: first with the local elements of the symbol
-    /// path (cheap, unthrottled, in parallel), then with the remote symbol servers for the rest, skipping the PDBs
-    /// the <see cref="NegativeSymbolCache"/> knows to be unpublished and recording the new misses.
+    /// path (cheap, unthrottled, in parallel), then with the remote symbol servers for the rest, skipping the servers
+    /// the <see cref="NegativeSymbolCache"/> knows not to publish a PDB and recording the new misses per server.
     /// </summary>
     private void FindPdbPaths(List<ModuleWork> works)
     {
@@ -456,7 +456,8 @@ internal sealed class EtlSymbolResolver
                 continue;
             }
 
-            if (negativeCache.IsKnownMissing(NegativeSymbolCache.MakeKey(file.PdbName, file.PdbSignature, file.PdbAge)))
+            // Skipped only when every server of the symbol path is known not to have it.
+            if (remoteElements.All(element => negativeCache.IsKnownMissing(NegativeSymbolCache.MakeKey(file.PdbName, file.PdbSignature, file.PdbAge, element.Target))))
             {
                 ReportProgress($"Skipping Known-Missing Symbols for Module `{file.Name}`");
             }
@@ -499,9 +500,15 @@ internal sealed class EtlSymbolResolver
                 var file = work.File;
                 string? path = null;
                 var timedOut = false;
-                foreach (var server in servers)
+                for (var serverIndex = 0; serverIndex < servers.Count; serverIndex++)
                 {
-                    var result = await server.LookupAsync(
+                    var key = NegativeSymbolCache.MakeKey(file.PdbName, file.PdbSignature, file.PdbAge, remoteElements[serverIndex].Target);
+                    if (negativeCache.IsKnownMissing(key))
+                    {
+                        continue;
+                    }
+
+                    var result = await servers[serverIndex].LookupAsync(
                         reader => reader.FindSymbolFilePath(file.PdbName, file.PdbSignature, file.PdbAge, file.FilePath, file.ProductVersion, portablePdbMatch: true),
                         SymbolServerLookupTimeout).ConfigureAwait(false);
                     path = result.Path;
@@ -510,12 +517,12 @@ internal sealed class EtlSymbolResolver
                     {
                         break;
                     }
-                }
 
-                // A lookup that timed out says nothing about whether the PDB is published: it is retried next time.
-                if (path is null && !timedOut)
-                {
-                    negativeCache.RecordMissing(NegativeSymbolCache.MakeKey(file.PdbName, file.PdbSignature, file.PdbAge));
+                    // A lookup that timed out says nothing about whether the PDB is published: it is retried next time.
+                    if (!result.TimedOut)
+                    {
+                        negativeCache.RecordMissing(key);
+                    }
                 }
 
                 work.PdbPath = path;
