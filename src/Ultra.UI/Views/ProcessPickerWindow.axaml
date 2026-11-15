@@ -1,0 +1,59 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Ultra.UI.ViewModels"
+        xmlns:services="using:Ultra.UI.Services"
+        xmlns:views="using:Ultra.UI.Views"
+        x:Class="Ultra.UI.Views.ProcessPickerWindow"
+        x:DataType="vm:ProcessPickerViewModel"
+        Title="Attach to a process"
+        Icon="avares://ultra-ui/Assets/ultra.png"
+        Width="820" Height="600" MinWidth="520" MinHeight="360"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource UltraWindowBackground}">
+  <DockPanel>
+    <Border DockPanel.Dock="Bottom" Classes="panel" BorderThickness="0,1,0,0" Padding="16,10">
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBlock Classes="hint" VerticalAlignment="Center" TextWrapping="Wrap"
+                   Text="Ctrl+click or Shift+click to attach to several processes. Double-click attaches to one." />
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" Margin="12,0,0,0">
+          <Button x:Name="SelectButton" Content="Select" Classes="accent" Click="OnSelect" IsDefault="True" MinWidth="90" HorizontalContentAlignment="Center"
+                  IsEnabled="{Binding !!SelectedProcesses.Count}" />
+          <Button Content="Cancel" Click="OnCancel" IsCancel="True" MinWidth="90" HorizontalContentAlignment="Center" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto,Auto" Margin="16,14,16,8">
+      <TextBox x:Name="FilterBox" Text="{Binding Filter}" PlaceholderText="Search by name, id, window title or path" />
+      <TextBlock Grid.Column="1" Classes="hint" Text="{Binding StatusText}" VerticalAlignment="Center" Margin="12,0" />
+      <Button Grid.Column="2" Content="Refresh" Command="{Binding RefreshCommand}" HotKey="F5" ToolTip.Tip="List the running processes again (F5)" />
+    </Grid>
+
+    <Grid DockPanel.Dock="Top" ColumnDefinitions="26,200,70,*" Margin="29,0,29,4">
+      <TextBlock Grid.Column="1" Classes="hint" Text="Name" />
+      <TextBlock Grid.Column="2" Classes="hint" Text="PID" />
+      <TextBlock Grid.Column="3" Classes="hint" Text="Window title / path" />
+    </Grid>
+
+    <Border Classes="card" Margin="16,0,16,12" Padding="0">
+      <ListBox x:Name="ProcessList" ItemsSource="{Binding FilteredProcesses}" SelectedItems="{Binding SelectedProcesses}" SelectionMode="Multiple"
+               Background="Transparent" DoubleTapped="OnProcessDoubleTapped">
+        <ListBox.ItemTemplate>
+          <DataTemplate x:DataType="services:ProcessInfo">
+            <Grid ColumnDefinitions="26,200,70,*" ToolTip.Tip="{Binding Path}">
+              <!-- Large icons drawn at 16px: sharp at 200% scaling and downscaled cleanly at 100%. -->
+              <Image Width="16" Height="16" HorizontalAlignment="Left" VerticalAlignment="Center" RenderOptions.BitmapInterpolationMode="HighQuality"
+                     Source="{Binding Path, Converter={x:Static views:ExecutableIconConverter.Instance}}" />
+              <TextBlock Grid.Column="1" Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+              <TextBlock Grid.Column="2" Text="{Binding Id}" FontFamily="Cascadia Mono,Consolas,monospace" VerticalAlignment="Center" />
+              <StackPanel Grid.Column="3" VerticalAlignment="Center">
+                <TextBlock Text="{Binding WindowTitle}" TextTrimming="CharacterEllipsis" IsVisible="{Binding WindowTitle, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+                <TextBlock Classes="hint" Text="{Binding Path, TargetNullValue='(path not available)'}" TextTrimming="PathSegmentEllipsis" />
+              </StackPanel>
+            </Grid>
+          </DataTemplate>
+        </ListBox.ItemTemplate>
+      </ListBox>
+    </Border>
+  </DockPanel>
+</Window>

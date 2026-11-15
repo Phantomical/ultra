@@ -143,7 +143,10 @@
 
               <StackPanel IsVisible="{Binding AttachToProcess}">
                 <TextBlock Classes="label" Text="Process id(s)" />
-                <TextBox Text="{Binding ProcessId}" PlaceholderText="e.g. 1234 (several separated by commas)" />
+                <Grid ColumnDefinitions="*,Auto">
+                  <TextBox Text="{Binding ProcessId}" PlaceholderText="e.g. 1234 (several separated by commas)" />
+                  <Button Grid.Column="1" Content="Select…" Command="{Binding SelectProcessCommand}" Margin="6,0,0,0" ToolTip.Tip="Pick from the running processes" />
+                </Grid>
               </StackPanel>
 
               <TextBlock Classes="sectionHeader" Text="Profiling" />

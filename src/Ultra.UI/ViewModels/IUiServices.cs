@@ -37,4 +37,9 @@ internal interface IUiServices
     /// <param name="settings">The settings to edit.</param>
     /// <returns><c>true</c> if the user accepted the changes.</returns>
     Task<bool> ShowSettingsAsync(SettingsViewModel settings);
+
+    /// <summary>Shows the process picker dialog.</summary>
+    /// <param name="picker">The picker.</param>
+    /// <returns><c>true</c> if the user selected processes.</returns>
+    Task<bool> PickProcessesAsync(ProcessPickerViewModel picker);
 }

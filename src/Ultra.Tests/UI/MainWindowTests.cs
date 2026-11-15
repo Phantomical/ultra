@@ -215,6 +215,61 @@ public class MainWindowTests
         window.Close();
     });
 
+    [TestMethod]
+    public void ProcessPickerWindowSelectsProcesses() => Run(viewModel =>
+    {
+        ProcessInfo[] processes =
+        [
+            new(1234, "KSP_x64", @"E:\KSP\Kerbal Space Program\KSP_x64.exe", "Kerbal Space Program"),
+            new(4321, "devenv", @"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\devenv.exe", "ultra - Microsoft Visual Studio"),
+            new(88, "svchost", null, ""),
+            new(5555, "explorer", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe"), ""),
+        ];
+        var picker = new ProcessPickerViewModel("88", () => processes, excludedProcessId: -1);
+        var window = new ProcessPickerWindow { DataContext = picker };
+        window.Show();
+        Dispatcher.UIThread.RunJobs();
+
+        var list = window.GetVisualDescendants().OfType<ListBox>().Single();
+        var select = window.GetVisualDescendants().OfType<Button>().Single(x => Equals(x.Content, "Select"));
+        Assert.AreEqual(4, list.ItemCount);
+        if (OperatingSystem.IsWindows())
+        {
+            // The executable has its icon; a process whose path is not available has none.
+            var icons = window.GetVisualDescendants().OfType<Image>().ToDictionary(x => ((ProcessInfo)x.DataContext!).Name);
+            Assert.AreEqual(4, icons.Count);
+            Assert.IsNotNull(icons["explorer"].Source);
+            Assert.IsNull(icons["svchost"].Source);
+        }
+
+        CollectionAssert.AreEqual(new[] { processes[2] }, list.SelectedItems!.Cast<object>().ToArray(), "The entered id is selected in the list");
+        Assert.IsTrue(select.IsEffectivelyEnabled);
+
+        // Selecting in the list selects in the view model, and filtering keeps the selection.
+        list.SelectedItems!.Add(processes[0]);
+        picker.Filter = "devenv";
+        Dispatcher.UIThread.RunJobs();
+        CollectionAssert.AreEquivalent(new[] { processes[0], processes[2] }, picker.SelectedProcesses);
+        CollectionAssert.AreEquivalent(new[] { processes[0], processes[2] }, list.SelectedItems!.Cast<object>().ToArray());
+        picker.Filter = "";
+        Dispatcher.UIThread.RunJobs();
+        SaveScreenshot(window, "process-picker-window.png");
+
+        list.SelectedItems!.Clear();
+        Dispatcher.UIThread.RunJobs();
+        Assert.AreEqual(0, picker.SelectedProcesses.Count);
+        Assert.IsFalse(select.IsEffectivelyEnabled, "Nothing to attach to");
+        window.Close();
+
+        // The attach mode of the main window has the button opening the picker.
+        viewModel.AttachToProcess = true;
+        var main = new MainWindow { DataContext = viewModel };
+        main.Show();
+        Dispatcher.UIThread.RunJobs();
+        Assert.IsTrue(main.GetVisualDescendants().OfType<Button>().Single(x => Equals(x.Content, "Select…")).IsEffectivelyVisible);
+        main.Close();
+    });
+
     private string CreateProgram()
     {
         var program = Path.Combine(_tempDirectory, OperatingSystem.IsWindows() ? "game.exe" : "game");

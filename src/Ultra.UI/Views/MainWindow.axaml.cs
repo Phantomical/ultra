@@ -116,6 +116,13 @@ internal sealed partial class MainWindow : Window, IUiServices
         return await window.ShowDialog<bool>(this);
     }
 
+    /// <inheritdoc />
+    public async Task<bool> PickProcessesAsync(ProcessPickerViewModel picker)
+    {
+        var window = new ProcessPickerWindow { DataContext = picker };
+        return await window.ShowDialog<bool>(this);
+    }
+
     private async void OnPointerPressed(object? sender, PointerPressedEventArgs e)
     {
         if (e.Source is not Visual source || !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)

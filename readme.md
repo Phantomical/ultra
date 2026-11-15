@@ -80,7 +80,7 @@ This mode is Windows x64 only. It has no kernel stacks and no context switches, 
 $ dotnet tool install -g Ultra.UI # The command ultra-ui.exe will be available from your PATH
 ```
 
-- Pick the program to launch (with its arguments, working directory and environment variables) or a process to attach to, then **Start session**. The UI itself runs without administrative rights: with **Run as administrator** checked, it asks Windows for consent and runs the profiler (and the program it launches) elevated, otherwise it uses user-mode sampling.
+- Pick the program to launch (with its arguments, working directory and environment variables) or a running process to attach to (picked from a searchable list), then **Start session**. The UI itself runs without administrative rights: with **Run as administrator** checked, it asks Windows for consent and runs the profiler (and the program it launches) elevated, otherwise it uses user-mode sampling.
 - Like `--paused`, a session takes as many captures as you want (**Start capture** / **Stop capture**, or F5/F6) until the program exits or you end the session; captures save in the background while the next one profiles.
 - Each saved capture has an **Open in Firefox Profiler** button: the UI serves the profile from `127.0.0.1` and opens `profiler.firefox.com/from-url/...`, so there is no file to drag and drop (the link works while the UI is running). You can still drag a capture by its `⠿` handle onto a Firefox Profiler tab.
 - **Settings** keeps custom symbol paths (searched before the default symbol servers) and the output folder (`Documents\ultra` by default) in `%APPDATA%\ultra\ui-settings.json`, together with the last launch settings.

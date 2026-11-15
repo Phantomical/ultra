@@ -513,6 +513,17 @@ internal sealed partial class MainWindowViewModel : ObservableObject, IDisposabl
     }
 
     [RelayCommand]
+    private async Task SelectProcessAsync()
+    {
+        if (_ui is null) return;
+        var picker = new ProcessPickerViewModel(ProcessId);
+        if (await _ui.PickProcessesAsync(picker) && picker.SelectedProcesses.Count > 0)
+        {
+            ProcessId = picker.SelectedProcessIdText;
+        }
+    }
+
+    [RelayCommand]
     private async Task BrowseWorkingDirectoryAsync()
     {
         if (_ui is null) return;
