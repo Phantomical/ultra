@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Avalonia.Headless" />
     <PackageReference Include="MSTest" />
     <PackageReference Include="Verify.DiffPlex" />
     <PackageReference Include="Verify.MSTest" />
@@ -17,6 +18,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Ultra.Core\Ultra.Core.csproj" />
     <ProjectReference Include="..\Ultra.Sampler\Ultra.Sampler.csproj" />
+    <ProjectReference Include="..\Ultra.UI\Ultra.UI.csproj" />
   </ItemGroup>
 
 </Project>

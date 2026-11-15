@@ -1,0 +1,267 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Ultra.UI.ViewModels"
+        x:Class="Ultra.UI.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="Ultra Profiler"
+        Icon="avares://ultra-ui/Assets/ultra.png"
+        Width="1320" Height="860" MinWidth="960" MinHeight="600"
+        Background="{DynamicResource UltraWindowBackground}"
+        DragDrop.AllowDrop="True">
+
+  <Window.Styles>
+    <Style Selector="Border.phase">
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Padding" Value="8,1" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Border.phase.profiling">
+      <Setter Property="Background" Value="{DynamicResource UltraProfilingBrush}" />
+    </Style>
+    <Style Selector="Border.phase.saving">
+      <Setter Property="Background" Value="{DynamicResource UltraSavingBrush}" />
+    </Style>
+    <Style Selector="Border.phase.ready">
+      <Setter Property="Background" Value="{DynamicResource UltraReadyBrush}" />
+    </Style>
+    <Style Selector="Border.phase.failed">
+      <Setter Property="Background" Value="{DynamicResource UltraFailedBrush}" />
+    </Style>
+    <Style Selector="Border.phase > TextBlock">
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Border.dragHandle">
+      <Setter Property="Background" Value="{DynamicResource UltraDragHandleBackground}" />
+      <Setter Property="CornerRadius" Value="4" />
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+    <Style Selector="TextBlock.output">
+      <Setter Property="FontFamily" Value="Cascadia Mono,Consolas,Menlo,monospace" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="TextWrapping" Value="NoWrap" />
+    </Style>
+    <Style Selector="TextBlock.output.ultra">
+      <Setter Property="Foreground" Value="{DynamicResource UltraInfoText}" />
+    </Style>
+    <Style Selector="TextBlock.output.error">
+      <Setter Property="Foreground" Value="{DynamicResource UltraErrorText}" />
+    </Style>
+    <Style Selector="ListBox.output ListBoxItem">
+      <Setter Property="Padding" Value="8,0" />
+      <Setter Property="MinHeight" Value="0" />
+    </Style>
+    <Style Selector="ListBox.captures ListBoxItem">
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Margin" Value="0,0,0,6" />
+    </Style>
+  </Window.Styles>
+
+  <DockPanel>
+    <!-- Toolbar -->
+    <Border DockPanel.Dock="Top" Classes="panel" BorderThickness="0,0,0,1" Padding="14,8">
+      <Grid ColumnDefinitions="Auto,*,Auto">
+        <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+          <Image Source="avares://ultra-ui/Assets/ultra.png" Width="26" Height="26" />
+          <TextBlock Text="Ultra" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center" />
+          <TextBlock Text="profiler for .NET" Classes="hint" VerticalAlignment="Center" />
+        </StackPanel>
+        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6">
+          <Button Content="Open profile…" Command="{Binding OpenProfileCommand}" ToolTip.Tip="Open an existing .json.gz profile in the Firefox Profiler" />
+          <Button Content="Output folder" Command="{Binding OpenOutputFolderCommand}" ToolTip.Tip="Open the folder the profiles are written to" />
+          <Button Content="Settings" Command="{Binding OpenSettingsCommand}" ToolTip.Tip="Symbol paths and output folder" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- Status bar -->
+    <Border DockPanel.Dock="Bottom" Classes="panel" BorderThickness="0,1,0,0" Padding="14,6">
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBlock Text="{Binding SessionStatus}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+        <TextBlock Grid.Column="1" Text="{Binding SessionModeText}" Classes="hint" VerticalAlignment="Center" Margin="12,0,0,0" />
+      </Grid>
+    </Border>
+
+    <Grid ColumnDefinitions="430,5,*">
+      <!-- Launch configuration -->
+      <Border Classes="panel" BorderThickness="0,0,1,0">
+        <DockPanel>
+          <Border DockPanel.Dock="Bottom" Padding="16,12" BorderThickness="0,1,0,0" BorderBrush="{DynamicResource UltraCardBorder}">
+            <StackPanel Spacing="6">
+              <Button Content="Start session" Command="{Binding StartSessionCommand}" Classes="accent" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Padding="0,8" FontWeight="SemiBold" />
+              <TextBlock Classes="hint" Text="A session launches (or attaches to) the program once; you can then take as many captures as you want until it exits or you end the session." />
+            </StackPanel>
+          </Border>
+
+          <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Margin="16,4,16,16" IsEnabled="{Binding IsIdle}">
+              <TextBlock Classes="sectionHeader" Text="Target" />
+              <StackPanel Orientation="Horizontal" Spacing="16">
+                <RadioButton GroupName="Target" Content="Launch a program" IsChecked="{Binding IsLaunchMode}" />
+                <RadioButton GroupName="Target" Content="Attach to a process" IsChecked="{Binding AttachToProcess}" />
+              </StackPanel>
+
+              <StackPanel IsVisible="{Binding IsLaunchMode}">
+                <TextBlock Classes="label" Text="Program" />
+                <Grid ColumnDefinitions="*,Auto">
+                  <ComboBox IsEditable="True" Text="{Binding ProgramPath}" ItemsSource="{Binding RecentPrograms}" PlaceholderText="C:\path\to\program.exe" HorizontalAlignment="Stretch" />
+                  <Button Grid.Column="1" Content="Browse…" Command="{Binding BrowseProgramCommand}" Margin="6,0,0,0" />
+                </Grid>
+
+                <TextBlock Classes="label" Text="Arguments" />
+                <TextBox Text="{Binding Arguments}" PlaceholderText="Command line arguments" />
+
+                <TextBlock Classes="label" Text="Working directory" />
+                <Grid ColumnDefinitions="*,Auto">
+                  <TextBox Text="{Binding WorkingDirectory}" PlaceholderText="{Binding WorkingDirectoryPlaceholder}" />
+                  <Button Grid.Column="1" Content="Browse…" Command="{Binding BrowseWorkingDirectoryCommand}" Margin="6,0,0,0" />
+                </Grid>
+
+                <Grid ColumnDefinitions="*,Auto" Margin="0,8,0,3">
+                  <TextBlock Classes="label" Text="Environment variables" Margin="0" VerticalAlignment="Center" />
+                  <Button Grid.Column="1" Classes="small" Content="Add" Command="{Binding AddEnvironmentVariableCommand}" />
+                </Grid>
+                <TextBlock Classes="hint" Text="Set on top of the environment of the profiler. No variables set." IsVisible="{Binding !EnvironmentVariables.Count}" />
+                <ItemsControl ItemsSource="{Binding EnvironmentVariables}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:EnvironmentVariableViewModel">
+                      <Grid ColumnDefinitions="Auto,140,*,Auto" Margin="0,2">
+                        <CheckBox IsChecked="{Binding Enabled}" MinWidth="0" Margin="0,0,4,0" ToolTip.Tip="Set this variable" />
+                        <TextBox Grid.Column="1" Text="{Binding Name}" PlaceholderText="NAME" FontFamily="Cascadia Mono,Consolas,monospace" />
+                        <TextBox Grid.Column="2" Text="{Binding Value}" PlaceholderText="value" Margin="4,0,0,0" FontFamily="Cascadia Mono,Consolas,monospace" />
+                        <Button Grid.Column="3" Classes="small" Content="✕" Margin="4,0,0,0" ToolTip.Tip="Remove"
+                                Command="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).RemoveEnvironmentVariableCommand}"
+                                CommandParameter="{Binding}" />
+                      </Grid>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <CheckBox Content="Show the output of the program" IsChecked="{Binding CaptureProgramOutput}" Margin="0,10,0,0" />
+              </StackPanel>
+
+              <StackPanel IsVisible="{Binding AttachToProcess}">
+                <TextBlock Classes="label" Text="Process id(s)" />
+                <TextBox Text="{Binding ProcessId}" PlaceholderText="e.g. 1234 (several separated by commas)" />
+              </StackPanel>
+
+              <TextBlock Classes="sectionHeader" Text="Profiling" />
+              <StackPanel IsVisible="{Binding IsWindows}">
+                <CheckBox Content="Run as administrator" IsChecked="{Binding RunAsAdministrator}" IsEnabled="{Binding CanChooseElevation}"
+                          ToolTip.Tip="Profiles with the kernel ETW session. Windows asks for consent when the session starts; the launched program runs as administrator too." />
+                <TextBlock Classes="hint" Text="The ultra UI already runs as administrator." IsVisible="{Binding IsAlreadyElevated}" Margin="28,0,0,0" />
+                <CheckBox Content="Use user-mode sampling" IsChecked="{Binding UserModeSampling}" />
+                <TextBlock Classes="hint" Text="{Binding SamplingModeHint}" Margin="0,4,0,0" />
+              </StackPanel>
+
+              <Grid ColumnDefinitions="*,12,*">
+                <StackPanel>
+                  <TextBlock Classes="label" Text="Sampling interval (ms)" />
+                  <TextBox Text="{Binding SamplingInterval}" PlaceholderText="Default" />
+                </StackPanel>
+                <StackPanel Grid.Column="2">
+                  <TextBlock Classes="label" Text="Max capture duration (s)" />
+                  <TextBox Text="{Binding MaxCaptureDuration}" PlaceholderText="No limit" />
+                </StackPanel>
+              </Grid>
+
+              <CheckBox Content="Start the first capture immediately" IsChecked="{Binding StartCaptureImmediately}" Margin="0,10,0,0" />
+            </StackPanel>
+          </ScrollViewer>
+        </DockPanel>
+      </Border>
+
+      <GridSplitter Grid.Column="1" Background="Transparent" ResizeDirection="Columns" />
+
+      <!-- Session -->
+      <Grid Grid.Column="2" RowDefinitions="Auto,*,5,240" Margin="12,12,14,12">
+        <Border Classes="card" Padding="12,10">
+          <Grid ColumnDefinitions="Auto,*,Auto">
+            <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+              <TextBlock Text="Session" Classes="hint" />
+              <TextBlock Text="{Binding StateText}" FontSize="16" FontWeight="SemiBold" />
+            </StackPanel>
+            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6">
+              <Button Content="● Start capture" Command="{Binding StartCaptureCommand}" Classes="accent" HotKey="F5" ToolTip.Tip="Start profiling (F5)" />
+              <Button Content="■ Stop capture" Command="{Binding StopCaptureCommand}" HotKey="F6" ToolTip.Tip="Stop and save this capture, keep the session (F6)" />
+              <Button Content="End session" Command="{Binding EndSessionCommand}" ToolTip.Tip="Stop and save the current capture, then end the session" />
+              <Button Content="Abort" Command="{Binding AbortSessionCommand}" ToolTip.Tip="End the session without saving the current capture" />
+            </StackPanel>
+          </Grid>
+        </Border>
+
+        <DockPanel Grid.Row="1" Margin="0,12,0,0">
+          <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,6">
+            <TextBlock Text="Captures" FontWeight="SemiBold" VerticalAlignment="Center" />
+            <Button Grid.Column="1" Classes="small" Content="Clear finished" Command="{Binding ClearFinishedCapturesCommand}" />
+          </Grid>
+          <Grid>
+            <TextBlock Classes="hint" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" MaxWidth="420"
+                       IsVisible="{Binding !Captures.Count}"
+                       Text="Captures appear here. Open them in the Firefox Profiler with one click, or drag the ⠿ handle onto a profiler.firefox.com tab." />
+            <ListBox Classes="captures" ItemsSource="{Binding Captures}" Background="Transparent">
+              <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="vm:CaptureViewModel">
+                  <Border Classes="card" Padding="10,8">
+                    <Grid ColumnDefinitions="Auto,*,Auto">
+                      <Border Classes="dragHandle" Width="22" Margin="0,0,10,0" IsVisible="{Binding IsCompleted}"
+                              ToolTip.Tip="Drag the profile file, e.g. onto a profiler.firefox.com tab">
+                        <TextBlock Text="⠿" FontSize="16" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                      </Border>
+                      <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                          <Border Classes="phase" Classes.profiling="{Binding IsProfiling}" Classes.saving="{Binding IsSaving}" Classes.ready="{Binding IsCompleted}" Classes.failed="{Binding IsFailed}">
+                            <TextBlock Text="{Binding PhaseText}" />
+                          </Border>
+                          <TextBlock Text="{Binding Title}" FontWeight="SemiBold" VerticalAlignment="Center" />
+                          <TextBlock Text="{Binding ProgramName}" Classes="hint" VerticalAlignment="Center" />
+                          <TextBlock Text="{Binding StartedAtText}" Classes="hint" VerticalAlignment="Center" />
+                          <TextBlock Text="{Binding SizeText}" Classes="hint" VerticalAlignment="Center" />
+                        </StackPanel>
+                        <TextBlock Text="{Binding StatusText}" Classes="hint" TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding StatusText}" />
+                        <TextBlock Text="{Binding FileName}" FontSize="11.5" TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding FilePath}" IsVisible="{Binding IsCompleted}" />
+                      </StackPanel>
+                      <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center" Margin="8,0,0,0">
+                        <Button Classes="accent small" Content="Open in Firefox Profiler" Command="{Binding OpenInFirefoxProfilerCommand}" IsVisible="{Binding IsCompleted}"
+                                ToolTip.Tip="Opens profiler.firefox.com, which downloads the profile from the ultra UI (keep it running)" />
+                        <Button Classes="small" Content="Copy link" Command="{Binding CopyFirefoxProfilerLinkCommand}" IsVisible="{Binding IsCompleted}"
+                                ToolTip.Tip="Copy the Firefox Profiler link (works while the ultra UI is running)" />
+                        <Button Classes="small" Content="Copy path" Command="{Binding CopyPathCommand}" IsVisible="{Binding IsCompleted}" />
+                        <Button Classes="small" Content="Show" Command="{Binding ShowInFolderCommand}" IsVisible="{Binding IsCompleted}" ToolTip.Tip="Show in folder" />
+                        <Button Classes="small" Content="✕" Command="{Binding RemoveCommand}" ToolTip.Tip="Remove from the list (the file is kept)" />
+                      </StackPanel>
+                    </Grid>
+                  </Border>
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+          </Grid>
+        </DockPanel>
+
+        <GridSplitter Grid.Row="2" Background="Transparent" ResizeDirection="Rows" />
+
+        <Border Grid.Row="3" Classes="card">
+          <DockPanel>
+            <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="10,6">
+              <TextBlock Text="Output" FontWeight="SemiBold" VerticalAlignment="Center" />
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
+                <CheckBox Content="Auto-scroll" IsChecked="{Binding AutoScrollOutput}" MinHeight="0" />
+                <Button Classes="small" Content="Copy" Command="{Binding CopyOutputCommand}" />
+                <Button Classes="small" Content="Clear" Command="{Binding ClearOutputCommand}" />
+              </StackPanel>
+            </Grid>
+            <ListBox x:Name="OutputList" Classes="output" ItemsSource="{Binding OutputLines}" Background="{DynamicResource UltraOutputBackground}"
+                     ScrollViewer.HorizontalScrollBarVisibility="Auto">
+              <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="vm:OutputLine">
+                  <TextBlock Classes="output" Classes.ultra="{Binding IsUltra}" Classes.error="{Binding IsError}" Text="{Binding Text}" />
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+          </DockPanel>
+        </Border>
+      </Grid>
+    </Grid>
+  </DockPanel>
+</Window>

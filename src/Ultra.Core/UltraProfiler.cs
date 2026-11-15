@@ -303,8 +303,20 @@ public abstract class UltraProfiler : IDisposable
                         // Wait for the process to start
                         if (cycleOptions.Paused)
                         {
+                            bool allProcessesExitedBeforeStart = false;
                             while (!cycleOptions.ShouldStartProfiling!() && !CancelRequested && !StopRequested)
                             {
+                                // Nothing is left to profile: end the session instead of waiting forever for a start.
+                                if (PausedSessionPlanner.AllProcessesExited(processList))
+                                {
+                                    allProcessesExitedBeforeStart = true;
+                                    break;
+                                }
+                            }
+
+                            if (allProcessesExitedBeforeStart)
+                            {
+                                quitBeforeCapture = true;
                             }
 
                             // If we have a cancel request, we don't start the profiling
@@ -666,11 +678,14 @@ public abstract class UltraProfiler : IDisposable
             startInfo.ArgumentList.Add(arg);
         }
 
+        ApplyLaunchSettings(startInfo, ultraProfilerOptions);
+
         ultraProfilerOptions.LogProgress?.Invoke($"Starting Process {startInfo.FileName} {string.Join(" ", startInfo.ArgumentList)}");
 
         if (mode == UltraProfilerConsoleMode.Silent)
         {
-            startInfo.UseShellExecute = true;
+            // Environment variables can only be passed to a process that is not started through the shell.
+            startInfo.UseShellExecute = ultraProfilerOptions.EnvironmentVariables.Count == 0;
             startInfo.CreateNoWindow = true;
             startInfo.WindowStyle = ProcessWindowStyle.Hidden;
 
@@ -743,6 +758,31 @@ public abstract class UltraProfiler : IDisposable
         }
 
         return state;
+    }
+
+    /// <summary>
+    /// Applies the <see cref="UltraProfilerOptions.WorkingDirectory"/> and <see cref="UltraProfilerOptions.EnvironmentVariables"/>
+    /// of the options to the start info of the program to launch. The environment block is only touched when there are
+    /// variables to set, as a start info whose environment was accessed cannot be started through the shell.
+    /// </summary>
+    internal static void ApplyLaunchSettings(ProcessStartInfo startInfo, UltraProfilerOptions ultraProfilerOptions)
+    {
+        if (!string.IsNullOrEmpty(ultraProfilerOptions.WorkingDirectory))
+        {
+            startInfo.WorkingDirectory = ultraProfilerOptions.WorkingDirectory;
+        }
+
+        foreach (var (name, value) in ultraProfilerOptions.EnvironmentVariables)
+        {
+            if (value is null)
+            {
+                startInfo.Environment.Remove(name);
+            }
+            else
+            {
+                startInfo.Environment[name] = value;
+            }
+        }
     }
 
     private bool WaitForCleanCancel(TimeSpan timeout)

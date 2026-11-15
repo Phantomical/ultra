@@ -56,6 +56,19 @@ internal class Program
                 { "symbol-path=", $"The {{VALUE}} of symbol path. The default value is `{options.GetCachedSymbolPath()}`.", v => options.SymbolPathText  = v },
                 { "paused", "Launch the profiler paused and wait for SPACE or ENTER to start profiling. While profiling, press S to stop and save that capture and wait for a new one, or Q to stop and quit. You can start/stop as many captures as you want before quitting.", v => options.Paused = v is not null },
                 { "control-pipe=", "Like --paused, but captures can also be started and stopped from another process with `ultra control {NAME} start|stop|wait|status|quit`. --duration still caps each capture.", v => { controlPipeName = v; options.Paused = true; } },
+                { "cwd=", "The working {DIR} of the program launched by ultra. Default is the current directory.", v => options.WorkingDirectory = v },
+                { "env=", "Sets the environment variable {NAME=VALUE} for the program launched by ultra. Can be repeated.", v =>
+                    {
+                        v ??= "";
+                        var separator = v.IndexOf('=');
+                        if (separator <= 0)
+                        {
+                            throw new CommandOptionException($"Invalid --env value `{v}`: expecting NAME=VALUE", "env");
+                        }
+
+                        options.EnvironmentVariables[v[..separator]] = v[(separator + 1)..];
+                    }
+                },
                 { "delay=", $"Starts profiling after a specific delay (seconds). Default is {options.DelayInSeconds}s.", (double delay) => options.DelayInSeconds = delay },
                 { "duration=", $"Run the profiler for a maximum duration (seconds). Default is {options.DurationInSeconds}s", (double duration) => options.DurationInSeconds = duration },
                 { "user-mode-sampling", $"Sample the threads of the profiled process from ultra itself (suspend, read the stack, walk it) instead of with the kernel ETW session, so that administrator rights are not needed - only the right to start a user ETW session (e.g. as a member of the Performance Log Users group). Windows x64 only; no kernel stacks or context switches; the default sampling interval is {UltraProfilerOptions.UserModeSamplingDefaultIntervalInMs:0.0}ms. Used automatically when ultra is not running elevated.", v => options.UserModeSampling = v is not null },

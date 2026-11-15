@@ -44,6 +44,18 @@ public class UltraProfilerOptions
     public List<string> Arguments { get; } = new();
 
     /// <summary>
+    /// Gets or sets the working directory of the program started with <see cref="ProgramPath"/>. When <c>null</c> or
+    /// empty, the program starts in the current directory of ultra.
+    /// </summary>
+    public string? WorkingDirectory { get; set; }
+
+    /// <summary>
+    /// Gets the environment variables to set for the program started with <see cref="ProgramPath"/>, on top of the
+    /// environment of ultra. A <c>null</c> value removes the variable from the environment of the program.
+    /// </summary>
+    public Dictionary<string, string?> EnvironmentVariables { get; } = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+
+    /// <summary>
     /// Gets or sets the interval in milliseconds to check delta time.
     /// </summary>
     public int CheckDeltaTimeInMs { get; set; }
@@ -244,15 +256,25 @@ public class UltraProfilerOptions
         }
         else
         {
-            var symbolPathText = SymbolPath.SymbolPathFromEnvironment;
-            if (string.IsNullOrEmpty(symbolPathText))
-            {
-                symbolPathText = $"{SymbolPath.MicrosoftSymbolServerPath};SRV*https://symbols.nuget.org/download/symbols";
-            }
-
-            symbolPath.Add(symbolPathText);
+            symbolPath.Add(GetDefaultSymbolPathText());
         }
 
         return symbolPath.InsureHasCache(symbolPath.DefaultSymbolCache()).CacheFirst();
+    }
+
+    /// <summary>
+    /// Gets the symbol path used when <see cref="SymbolPathText"/> is not set: the <c>_NT_SYMBOL_PATH</c> environment
+    /// variable if it is defined, otherwise the Microsoft and NuGet symbol servers.
+    /// </summary>
+    /// <returns>The default symbol path text.</returns>
+    public static string GetDefaultSymbolPathText()
+    {
+        var symbolPathText = SymbolPath.SymbolPathFromEnvironment;
+        if (string.IsNullOrEmpty(symbolPathText))
+        {
+            symbolPathText = $"{SymbolPath.MicrosoftSymbolServerPath};SRV*https://symbols.nuget.org/download/symbols";
+        }
+
+        return symbolPathText;
     }
 }

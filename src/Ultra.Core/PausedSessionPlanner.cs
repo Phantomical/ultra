@@ -27,4 +27,21 @@ internal static class PausedSessionPlanner
         if (allProfiledProcessesExited) return false;
         return true;
     }
+
+    /// <summary>
+    /// Decides whether a paused profiling session waiting for a capture to start has nothing left to profile.
+    /// </summary>
+    /// <param name="processes">The processes profiled by the session.</param>
+    /// <returns><c>true</c> if there is at least one profiled process and all of them have exited; otherwise, <c>false</c>.</returns>
+    public static bool AllProcessesExited(IReadOnlyList<System.Diagnostics.Process> processes)
+    {
+        if (processes.Count == 0) return false;
+
+        foreach (var process in processes)
+        {
+            if (!process.HasExited) return false;
+        }
+
+        return true;
+    }
 }

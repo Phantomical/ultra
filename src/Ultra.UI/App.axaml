@@ -1,0 +1,75 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Ultra.UI.App"
+             RequestedThemeVariant="Default">
+  <Application.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Light">
+          <SolidColorBrush x:Key="UltraWindowBackground" Color="#F4F5F7" />
+          <SolidColorBrush x:Key="UltraPanelBackground" Color="#FFFFFF" />
+          <SolidColorBrush x:Key="UltraCardBackground" Color="#FFFFFF" />
+          <SolidColorBrush x:Key="UltraCardBorder" Color="#DDE0E5" />
+          <SolidColorBrush x:Key="UltraMutedText" Color="#5F6670" />
+          <SolidColorBrush x:Key="UltraErrorText" Color="#C42B1C" />
+          <SolidColorBrush x:Key="UltraInfoText" Color="#1F5FAD" />
+          <SolidColorBrush x:Key="UltraOutputBackground" Color="#FAFBFC" />
+          <SolidColorBrush x:Key="UltraProfilingBrush" Color="#D13438" />
+          <SolidColorBrush x:Key="UltraSavingBrush" Color="#B76E00" />
+          <SolidColorBrush x:Key="UltraReadyBrush" Color="#107C10" />
+          <SolidColorBrush x:Key="UltraFailedBrush" Color="#8A8F98" />
+          <SolidColorBrush x:Key="UltraDragHandleBackground" Color="#EEF1F5" />
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Dark">
+          <SolidColorBrush x:Key="UltraWindowBackground" Color="#1B1D21" />
+          <SolidColorBrush x:Key="UltraPanelBackground" Color="#23262B" />
+          <SolidColorBrush x:Key="UltraCardBackground" Color="#2A2D33" />
+          <SolidColorBrush x:Key="UltraCardBorder" Color="#3A3E46" />
+          <SolidColorBrush x:Key="UltraMutedText" Color="#A3A9B3" />
+          <SolidColorBrush x:Key="UltraErrorText" Color="#FF8A80" />
+          <SolidColorBrush x:Key="UltraInfoText" Color="#8AB4F8" />
+          <SolidColorBrush x:Key="UltraOutputBackground" Color="#17191C" />
+          <SolidColorBrush x:Key="UltraProfilingBrush" Color="#FF6B6B" />
+          <SolidColorBrush x:Key="UltraSavingBrush" Color="#F2B84B" />
+          <SolidColorBrush x:Key="UltraReadyBrush" Color="#6CCB5F" />
+          <SolidColorBrush x:Key="UltraFailedBrush" Color="#8A8F98" />
+          <SolidColorBrush x:Key="UltraDragHandleBackground" Color="#33373E" />
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
+    </ResourceDictionary>
+  </Application.Resources>
+
+  <Application.Styles>
+    <FluentTheme />
+
+    <Style Selector="TextBlock.sectionHeader">
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Margin" Value="0,14,0,6" />
+    </Style>
+    <Style Selector="TextBlock.label">
+      <Setter Property="Margin" Value="0,8,0,3" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="Foreground" Value="{DynamicResource UltraMutedText}" />
+    </Style>
+    <Style Selector="TextBlock.hint">
+      <Setter Property="FontSize" Value="11.5" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+      <Setter Property="Foreground" Value="{DynamicResource UltraMutedText}" />
+    </Style>
+    <Style Selector="Border.card">
+      <Setter Property="Background" Value="{DynamicResource UltraCardBackground}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource UltraCardBorder}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="6" />
+    </Style>
+    <Style Selector="Border.panel">
+      <Setter Property="Background" Value="{DynamicResource UltraPanelBackground}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource UltraCardBorder}" />
+    </Style>
+    <Style Selector="Button.small">
+      <Setter Property="Padding" Value="8,3" />
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+  </Application.Styles>
+</Application>

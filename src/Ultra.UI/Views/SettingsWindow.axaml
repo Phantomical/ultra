@@ -1,0 +1,65 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Ultra.UI.ViewModels"
+        x:Class="Ultra.UI.Views.SettingsWindow"
+        x:DataType="vm:SettingsViewModel"
+        Title="Ultra Settings"
+        Icon="avares://ultra-ui/Assets/ultra.png"
+        Width="760" Height="620" MinWidth="560" MinHeight="420"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource UltraWindowBackground}">
+  <DockPanel>
+    <Border DockPanel.Dock="Bottom" Classes="panel" BorderThickness="0,1,0,0" Padding="16,10">
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+        <Button Content="Save" Classes="accent" Click="OnSave" IsDefault="True" MinWidth="90" HorizontalContentAlignment="Center" />
+        <Button Content="Cancel" Click="OnCancel" IsCancel="True" MinWidth="90" HorizontalContentAlignment="Center" />
+      </StackPanel>
+    </Border>
+
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+      <StackPanel Margin="20,8,20,20">
+        <TextBlock Classes="sectionHeader" Text="Symbol path" />
+        <TextBlock Classes="hint" Text="Where the profiler looks for symbols (.pdb) of native and managed modules, in this order. An entry is a folder, or a symbol server such as SRV*C:\SymbolCache*https://symbols.example.com. Entries can also be ;-separated lists." />
+
+        <ItemsControl ItemsSource="{Binding SymbolPaths}" Margin="0,8,0,0">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="vm:SymbolPathEntryViewModel">
+              <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto" Margin="0,2">
+                <CheckBox IsChecked="{Binding Enabled}" MinWidth="0" Margin="0,0,4,0" ToolTip.Tip="Use this entry" />
+                <TextBox Grid.Column="1" Text="{Binding Path}" PlaceholderText="Folder or SRV*cache*server" FontFamily="Cascadia Mono,Consolas,monospace" />
+                <Button Grid.Column="2" Classes="small" Content="▲" Margin="4,0,0,0" ToolTip.Tip="Search earlier"
+                        Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).MoveSymbolPathUpCommand}" CommandParameter="{Binding}" />
+                <Button Grid.Column="3" Classes="small" Content="▼" Margin="2,0,0,0" ToolTip.Tip="Search later"
+                        Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).MoveSymbolPathDownCommand}" CommandParameter="{Binding}" />
+                <Button Grid.Column="4" Classes="small" Content="✕" Margin="2,0,0,0" ToolTip.Tip="Remove"
+                        Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).RemoveSymbolPathCommand}" CommandParameter="{Binding}" />
+              </Grid>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,8,0,0">
+          <Button Classes="small" Content="Add entry" Command="{Binding AddSymbolPathCommand}" />
+          <Button Classes="small" Content="Add folder…" Command="{Binding AddSymbolFolderCommand}" />
+          <Button Classes="small" Content="Add symbol server" Command="{Binding AddSymbolServerCommand}" />
+        </StackPanel>
+
+        <CheckBox Content="Then search the default symbol path" IsChecked="{Binding IncludeDefaultSymbolPath}" Margin="0,12,0,0" />
+        <TextBlock Classes="hint" Text="{Binding DefaultSymbolPath}" Margin="28,0,0,0" TextWrapping="Wrap" />
+
+        <TextBlock Classes="label" Text="Effective symbol path" Margin="0,14,0,3" />
+        <Border Classes="card" Padding="10,8">
+          <SelectableTextBlock Text="{Binding EffectiveSymbolPath}" TextWrapping="Wrap" FontFamily="Cascadia Mono,Consolas,monospace" FontSize="12" />
+        </Border>
+        <TextBlock Classes="hint" Margin="0,4,0,0" Text="Downloaded symbols are cached in the default symbol cache. Changes apply to the next session." />
+
+        <TextBlock Classes="sectionHeader" Text="Profiles" />
+        <TextBlock Classes="label" Text="Output folder" />
+        <Grid ColumnDefinitions="*,Auto">
+          <TextBox Text="{Binding OutputDirectory}" PlaceholderText="{Binding DefaultOutputDirectory}" />
+          <Button Grid.Column="1" Content="Browse…" Command="{Binding BrowseOutputDirectoryCommand}" Margin="6,0,0,0" />
+        </Grid>
+      </StackPanel>
+    </ScrollViewer>
+  </DockPanel>
+</Window>

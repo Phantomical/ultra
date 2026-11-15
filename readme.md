@@ -72,6 +72,19 @@ When ultra is not elevated, or with `--user-mode-sampling`, ultra samples the pr
 
 This mode is Windows x64 only. It has no kernel stacks and no context switches, a thread is sampled in proportion to its CPU time but may be caught in a wait it just entered, and its samples cost the profiled threads a short suspension (tens of microseconds).
 
+### Desktop UI (Windows)
+
+`ultra-ui` is a desktop UI for the same profiler. It is installed separately:
+
+```console
+$ dotnet tool install -g Ultra.UI # The command ultra-ui.exe will be available from your PATH
+```
+
+- Pick the program to launch (with its arguments, working directory and environment variables) or a process to attach to, then **Start session**. The UI itself runs without administrative rights: with **Run as administrator** checked, it asks Windows for consent and runs the profiler (and the program it launches) elevated, otherwise it uses user-mode sampling.
+- Like `--paused`, a session takes as many captures as you want (**Start capture** / **Stop capture**, or F5/F6) until the program exits or you end the session; captures save in the background while the next one profiles.
+- Each saved capture has an **Open in Firefox Profiler** button: the UI serves the profile from `127.0.0.1` and opens `profiler.firefox.com/from-url/...`, so there is no file to drag and drop (the link works while the UI is running). You can still drag a capture by its `⠿` handle onto a Firefox Profiler tab.
+- **Settings** keeps custom symbol paths (searched before the default symbol servers) and the output folder (`Documents\ultra` by default) in `%APPDATA%\ultra\ui-settings.json`, together with the last launch settings.
+
 ### macOS (Apple Silicon)
 
 On macOS, **no elevated privileges are required**. The profiler injects a small sampler library into the launched process to collect native and managed call stacks.

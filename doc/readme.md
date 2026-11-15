@@ -180,6 +180,10 @@ Usage: ultra profile [Options] <pid | -- execName arg0 arg1...>
       --control-pipe=NAME           Like --paused, but captures can also be started and stopped from another
                                       process with `ultra control NAME start|stop|wait|status|quit`. --duration
                                       still caps each capture.
+      --cwd=DIR                     The working DIR of the program launched by ultra. Default is the current
+                                      directory.
+      --env=NAME=VALUE              Sets the environment variable NAME=VALUE for the program launched by ultra. Can
+                                      be repeated.
       --delay=VALUE                 Starts profiling after a specific delay (seconds). Default is 0s.
       --duration=VALUE              Run the profiler for a maximum duration (seconds). Default is 120s
       --user-mode-sampling          Sample the threads of the profiled process from ultra itself (suspend, read the
@@ -233,6 +237,19 @@ $ ultra.exe profile --paused -- my_command.exe arg0 arg1 arg2...
 - Press `Q` (while waiting or while profiling) to stop and save the current capture (if any) and quit; ultra waits for every capture still saving in the background before it exits.
 - `CTRL+C`: press once to stop and save the current capture and quit, waiting for any background saves; press again to abort immediately without saving anything still in flight.
 - `--duration` caps each individual capture, not the whole session; once it is reached, that capture moves to saving and ultra waits for the next one.
+- When every profiled process has exited while ultra waits for a capture to start (e.g. through `--control-pipe`), the session ends.
+
+## Ultra Desktop UI
+
+`ultra-ui` (`dotnet tool install -g Ultra.UI`) drives the same profiler from a window:
+
+- **Target**: launch a program (arguments, working directory - the folder of the program by default - and environment variables) or attach to process ids.
+- **Profiling**: *Run as administrator* profiles with the kernel ETW session (kernel/native stacks, context switches); the UI asks Windows for consent and runs a separate profiler process elevated, which also runs the launched program elevated. Unchecked, or with *Use user-mode sampling*, the session uses user-mode sampling. The sampling interval and a maximum duration per capture are optional (no limit by default).
+- **Session**: a session works like `ultra profile --paused`: *Start capture* (F5) and *Stop capture* (F6) as many times as needed; a stopped capture saves in the background while the next one can start. *End session* saves the current capture and ends; *Abort* ends without saving it. Closing the UI ends the session, saving the current capture.
+- **Captures**: *Open in Firefox Profiler* opens `https://profiler.firefox.com/from-url/...` pointing to a small HTTP server of the UI on `127.0.0.1`, which serves only the profiles it lists (each under a random token) and only while the UI runs. *Copy link* copies that link. The `⠿` handle drags the `.json.gz` file, e.g. onto a Firefox Profiler tab. *Open profile…* (or dropping a `.json.gz` on the window) adds an existing profile to the list; dropping an `.exe` selects it as the program to launch.
+- **Settings**: custom symbol path entries (folders or `SRV*cache*server` entries, searched in order, then optionally the default symbol path) and the output folder (`Documents\ultra` by default). Settings and the last launch settings are saved in `%APPDATA%\ultra\ui-settings.json`.
+
+The output of the launched program (when *Show the output of the program* is checked) and the messages of ultra are shown in the *Output* panel.
 
 ### Convert
 
